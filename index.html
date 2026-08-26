@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-<title>VIBEMAN Motion Capture v6 FBX</title>
+<title>VIBEMAN Motion Capture v7</title>
 <style>
 :root{color-scheme:dark;--bg:#0a0a0a;--panel:#141414;--line:#2a2a2a;--text:#f5f5f5;--muted:#9a9a9a;--accent:#f4ff66}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow-x:hidden}
@@ -16,10 +16,10 @@ video,.poseCanvas,#three{position:absolute;inset:0;width:100%;height:100%;displa
 </style>
 </head>
 <body>
-<header><div class="brand">VIBEMAN / MOTION CAPTURE v5</div><div id="status" class="status">INITIALIZING…</div></header>
+<header><div class="brand">VIBEMAN / MOTION CAPTURE v7</div><div id="status" class="status">INITIALIZING…</div></header>
 <main>
   <section id="cameraStage" class="stage camera"><div class="label">WEBCAM / 33 LANDMARKS</div><video id="video" playsinline muted></video><canvas id="poseCanvas" class="poseCanvas"></canvas><div id="cameraNotice" class="notice">START CAMERA を押してください。<br>全身が画面に入る距離がおすすめです。</div></section>
-  <section class="stage"><div class="label">VIBEMAN / 017.FBX</div><div id="three"></div><div id="modelNotice" class="notice">3D MODEL LOADING…</div></section>
+  <section class="stage"><div class="label">VIBEMAN / SINGLE RIG</div><div id="three"></div><div id="modelNotice" class="notice">3D MODEL LOADING…</div></section>
 </main>
 <div class="controls">
   <button id="startBtn" class="primary">START CAMERA</button>
@@ -64,7 +64,7 @@ window.addEventListener('unhandledrejection', (e) => {
 
 <script type="module">
 import * as THREE from 'three';
-import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FilesetResolver, PoseLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/+esm';
 
@@ -101,76 +101,30 @@ const childName={
  RightShoulder:'RightArm',RightArm:'RightForeArm',RightForeArm:'RightHand',
  LeftUpLeg:'LeftLeg',LeftLeg:'LeftFoot',RightUpLeg:'RightLeg',RightLeg:'RightFoot'
 };
-const BONE_ALIASES={
- Hips:['hips','pelvis','root'],
- Spine:['spine','spine0'],
- Spine1:['spine1','spine01','chest'],
- Spine2:['spine2','spine02','upperchest'],
- Neck:['neck'],
- Head:['head'],
- LeftShoulder:['leftshoulder','shoulderl','lshoulder'],
- LeftArm:['leftarm','upperarml','leftupperarm','arml'],
- LeftForeArm:['leftforearm','lowerarml','leftlowerarm','forearml'],
- LeftHand:['lefthand','handl'],
- RightShoulder:['rightshoulder','shoulderr','rshoulder'],
- RightArm:['rightarm','upperarmr','rightupperarm','armr'],
- RightForeArm:['rightforearm','lowerarmr','rightlowerarm','forearmr'],
- RightHand:['righthand','handr'],
- LeftUpLeg:['leftupleg','leftthigh','thighl','upperlegl'],
- LeftLeg:['leftleg','leftshin','calfl','lowerlegl'],
- LeftFoot:['leftfoot','footl'],
- RightUpLeg:['rightupleg','rightthigh','thighr','upperlegr'],
- RightLeg:['rightleg','rightshin','calfr','lowerlegr'],
- RightFoot:['rightfoot','footr']
-};
-function normBoneName(s){
- return String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
-}
-function boneMatches(objName,key){
- const n=normBoneName(objName);
- const aliases=BONE_ALIASES[key]||[key];
- return aliases.some(a=>{
-   const q=normBoneName(a);
-   return n===q || n.endsWith(q) || n.includes(q);
- });
-}
 function findAllNamed(root,name){
  const arr=[];
  root.traverse(o=>{
-   if(o.isBone && boneMatches(o.name,name)) arr.push(o);
+   if(o.isBone && (o.name===`mixamorig:${name}`||o.name.endsWith(`:${name}`))) arr.push(o);
  });
  return arr;
 }
 function buildRigs(){
  RIGS.length=0;
- let hip=findAllNamed(model,'Hips')[0];
-
- // Fallback: choose the first bone with several humanoid descendants.
- if(!hip){
-   const bones=[];
-   model.traverse(o=>{if(o.isBone) bones.push(o);});
-   hip=bones.find(b=>{
-     let count=0;
-     b.traverse(o=>{if(o.isBone) count++;});
-     return count>=8;
-   }) || bones[0];
- }
+ const hips=findAllNamed(model,'Hips');
+ const hip=hips[0];
  if(!hip)return;
 
  const rig={bones:{},rest:{}};
  for(const n of boneNames){
    let found=null;
    hip.traverse(o=>{
-     if(!found && o.isBone && boneMatches(o.name,n)) found=o;
+     if(!found && o.isBone && (o.name===`mixamorig:${n}`||o.name.endsWith(`:${n}`))) found=o;
    });
    if(n==='Hips') found=hip;
    rig.bones[n]=found;
  }
  rig.armature=hip.parent;
  RIGS.push(rig);
- console.info('FBX bone map',Object.fromEntries(
-   Object.entries(rig.bones).map(([k,v])=>[k,v?.name||null])
- ));
 }
 function storeRest(){
  model.updateMatrixWorld(true);
@@ -201,7 +155,7 @@ function resetPose(){
  }
  model.updateMatrixWorld(true);
 }
-resetBtn.addEventListener('click',()=>{resetPose(); requestAnimationFrame(()=>fitModelToFrame(1.45));});
+resetBtn.addEventListener('click',()=>{resetPose(); requestAnimationFrame(()=>fitModelToFrame(1.60));});
 
 function getModelBounds(){
  if(!model)return null;
@@ -209,8 +163,9 @@ function getModelBounds(){
  const box=new THREE.Box3();
  let found=false;
  model.traverse(o=>{
-   if(!o.visible || !o.isMesh)return;
-   if(o.isSkinnedMesh && typeof o.computeBoundingBox==='function') o.computeBoundingBox();
+   if(!o.visible || !o.isSkinnedMesh)return;
+   // SkinnedMesh.computeBoundingBox() evaluates the current skeleton pose.
+   if(typeof o.computeBoundingBox==='function') o.computeBoundingBox();
    else if(o.geometry && !o.geometry.boundingBox) o.geometry.computeBoundingBox();
    const srcBox=o.boundingBox || o.geometry?.boundingBox;
    if(!srcBox)return;
@@ -271,22 +226,18 @@ function fitModelToFrame(padding=1.35){
  orbit.update();
 }
 
-fitBtn.addEventListener('click',()=>fitModelToFrame(1.45));
+fitBtn.addEventListener('click',()=>fitModelToFrame(1.60));
 
-new FBXLoader().load('./017.fbx',fbx=>{
- model=fbx;
+new GLTFLoader().load('./vibeman_02.glb',gltf=>{
+ model=gltf.scene;
 
- // FBX model: keep the model as one character and prepare mesh rendering.
+ // vibeman_02.glb contains one skinned character and one humanoid rig.
  model.traverse(o=>{
    if(o.isMesh){
+     o.visible=true;
+     o.frustumCulled=false;
      o.castShadow=true;
      o.receiveShadow=true;
-     if(o.material){
-       const mats=Array.isArray(o.material)?o.material:[o.material];
-       for(const m of mats){
-         if('side' in m) m.side=THREE.DoubleSide;
-       }
-     }
    }
  });
 
@@ -297,15 +248,16 @@ new FBXLoader().load('./017.fbx',fbx=>{
  normalizeModel();
  model.updateMatrixWorld(true);
  storeRest();
- fitModelToFrame(1.45);
+ fitModelToFrame(1.60);
+ requestAnimationFrame(()=>requestAnimationFrame(()=>fitModelToFrame(1.60)));
 
  modelNotice.hidden=true;
- statusEl.textContent=RIGS.length?'MODEL READY / FBX':'MODEL READY / NO RIG';
- console.info('FBX loaded:',fbx,'rigs:',RIGS.length);
+ statusEl.textContent=RIGS.length ? 'MODEL READY / 1 RIG' : 'MODEL READY / NO RIG';
+ console.info('GLB loaded:',gltf,'rigs:',RIGS.length);
 },undefined,err=>{
  console.error(err);
  modelNotice.hidden=false;
- modelNotice.textContent='MODEL LOAD ERROR：017.fbx が同じフォルダにあるか確認してください。';
+ modelNotice.textContent='MODEL LOAD ERROR：vibeman_02.glb が同じフォルダにあるか確認してください。';
  statusEl.textContent='MODEL ERROR';
 });
 
