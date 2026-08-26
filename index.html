@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-<title>VIBEMAN Motion Capture v9.2</title>
+<title>VIBEMAN Motion Capture v9.3</title>
 <style>
 :root{color-scheme:dark;--bg:#0a0a0a;--panel:#141414;--line:#2a2a2a;--text:#f5f5f5;--muted:#9a9a9a;--accent:#f4ff66}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow-x:hidden}
@@ -16,7 +16,7 @@ video,.poseCanvas,#three{position:absolute;inset:0;width:100%;height:100%;displa
 </style>
 </head>
 <body>
-<header><div class="brand">VIBEMAN / MOTION CAPTURE v9.2</div><div id="status" class="status">INITIALIZING…</div></header>
+<header><div class="brand">VIBEMAN / MOTION CAPTURE v9.3</div><div id="status" class="status">INITIALIZING…</div></header>
 <main>
   <section id="cameraStage" class="stage camera"><div class="label">WEBCAM / 33 LANDMARKS</div><video id="video" playsinline muted></video><canvas id="poseCanvas" class="poseCanvas"></canvas><div id="cameraNotice" class="notice">START CAMERA を押してください。<br>全身が画面に入る距離がおすすめです。</div></section>
   <section class="stage"><div class="label">VIBEMAN / SKELETON DIRECT</div><div id="three"></div><div id="modelNotice" class="notice">3D MODEL LOADING…</div></section>
@@ -173,7 +173,49 @@ function resetPose(){
  }
  model.updateMatrixWorld(true);
 }
-resetBtn.addEventListener('click',()=>{resetPose(); requestAnimationFrame(()=>fitModelToFrame(1.55));});
+resetBtn.addEventListener('click',()=>{resetPose(); normalizeModel(); requestAnimationFrame(()=>fitModelToFrame(1.85));});
+
+function getSkinnedMeshBounds(){
+ if(!model || !modelHolder)return null;
+
+ modelHolder.updateMatrixWorld(true);
+ model.updateMatrixWorld(true);
+
+ const box=new THREE.Box3();
+ let found=false;
+
+ model.traverse(o=>{
+   if(!o.visible || !o.isSkinnedMesh)return;
+
+   try{
+     // Update the actual deformed character, not the undeformed source geometry.
+     o.skeleton?.update();
+     o.computeBoundingBox();
+   }catch(e){
+     console.warn('SkinnedMesh bounding-box update failed:',e);
+   }
+
+   if(!o.boundingBox)return;
+
+   const worldBox=o.boundingBox.clone().applyMatrix4(o.matrixWorld);
+   const vals=[
+     worldBox.min.x,worldBox.min.y,worldBox.min.z,
+     worldBox.max.x,worldBox.max.y,worldBox.max.z
+   ];
+   if(vals.every(Number.isFinite)){
+     box.union(worldBox);
+     found=true;
+   }
+ });
+
+ if(!found || box.isEmpty())return null;
+
+ // Small visual margin for antialiasing / round extremities.
+ const size=box.getSize(new THREE.Vector3());
+ const margin=Math.max(size.x,size.y,size.z,0.001)*0.06;
+ box.expandByScalar(margin);
+ return box;
+}
 
 function getSkeletonBounds(){
  if(!RIGS[0]?.skinned?.skeleton?.bones?.length)return null;
@@ -192,21 +234,13 @@ function getSkeletonBounds(){
      count++;
    }
  }
-
- if(count<2 || box.isEmpty())return null;
-
- // Bones lie near joint centers. Add a body-volume margin so head/hands/feet stay visible.
- const size=box.getSize(new THREE.Vector3());
- const margin=Math.max(size.x,size.y,size.z,0.001)*0.16;
- box.min.addScalar(-margin);
- box.max.addScalar(margin);
- return box;
+ return count>=2 && !box.isEmpty() ? box : null;
 }
 
 function getModelBounds(){
- // For this rigged model, skeleton positions are considerably more reliable than
- // the raw geometry bounding box exported from Blender.
- return getSkeletonBounds();
+ // Primary source: actual currently rendered/deformed SkinnedMesh.
+ // Skeleton bounds remain only as a fallback.
+ return getSkinnedMeshBounds() || getSkeletonBounds();
 }
 
 function normalizeModel(){
@@ -218,37 +252,37 @@ function normalizeModel(){
  modelHolder.updateMatrixWorld(true);
  model.updateMatrixWorld(true);
 
- let box=getSkeletonBounds();
+ let box=getModelBounds();
  if(!box)return;
 
  const size=box.getSize(new THREE.Vector3());
  const maxDim=Math.max(size.x,size.y,size.z,0.001);
 
- // Keep a comfortable amount of empty space around the doll.
- const targetMax=1.35;
+ // Normalize the *visible mesh* rather than the skeleton.
+ const targetMax=1.20;
  const s=targetMax/maxDim;
  modelHolder.scale.setScalar(s);
  modelHolder.updateMatrixWorld(true);
  model.updateMatrixWorld(true);
 
- box=getSkeletonBounds();
+ box=getModelBounds();
  if(!box)return;
 
  const center=box.getCenter(new THREE.Vector3());
- modelHolder.position.x-=center.x;
- modelHolder.position.y-=center.y;
- modelHolder.position.z-=center.z;
+
+ // Holder is directly under the Scene, so these are world-space corrections.
+ modelHolder.position.set(-center.x,-center.y,-center.z);
  modelHolder.updateMatrixWorld(true);
  model.updateMatrixWorld(true);
 }
 
-function fitModelToFrame(padding=1.55){
+function fitModelToFrame(padding=1.85){
  if(!modelHolder || !RIGS[0])return;
 
  modelHolder.updateMatrixWorld(true);
  model.updateMatrixWorld(true);
 
- const box=getSkeletonBounds();
+ const box=getModelBounds();
  if(!box)return;
 
  const size=box.getSize(new THREE.Vector3());
@@ -259,23 +293,25 @@ function fitModelToFrame(padding=1.55){
 
  const distV=(size.y*0.5)/Math.max(Math.tan(vFov/2),0.001);
  const distH=(size.x*0.5)/Math.max(Math.tan(hFov/2),0.001);
- const dist=Math.max(distV,distH,size.z*1.3,0.9)*padding;
+
+ // Include depth and generous padding so the complete visible mesh stays in frame.
+ const dist=Math.max(distV,distH,size.z*1.4,0.8)*padding;
 
  orbit.target.copy(center);
  cam.position.set(center.x,center.y,center.z+dist);
- cam.near=0.01;
- cam.far=Math.max(50,dist*30);
+ cam.near=Math.max(0.005,dist/500);
+ cam.far=Math.max(50,dist*50);
  cam.updateProjectionMatrix();
  orbit.update();
 
- console.info('FIT MODEL', {
+ console.info('FIT MODEL / SKINNED MESH', {
    size:{x:size.x,y:size.y,z:size.z},
    center:{x:center.x,y:center.y,z:center.z},
    distance:dist
  });
 }
 
-fitBtn.addEventListener('click',()=>fitModelToFrame(1.55));
+fitBtn.addEventListener('click',()=>{ normalizeModel(); requestAnimationFrame(()=>fitModelToFrame(1.85)); });
 
 new GLTFLoader().load('./vibeman_02.glb',gltf=>{
  model=gltf.scene;
@@ -297,11 +333,15 @@ new GLTFLoader().load('./vibeman_02.glb',gltf=>{
  buildRigs();
 
  // Normalize using the actually skinned character bounds, then auto-fit the camera.
- normalizeModel();
  model.updateMatrixWorld(true);
  storeRest();
- fitModelToFrame(1.55);
- requestAnimationFrame(()=>requestAnimationFrame(()=>fitModelToFrame(1.55)));
+
+ // Let Three.js finish the skin matrices first, then measure the actual visible mesh.
+ requestAnimationFrame(()=>{
+   model.updateMatrixWorld(true);
+   normalizeModel();
+   requestAnimationFrame(()=>fitModelToFrame(1.85));
+ });
 
  modelNotice.hidden=true;
  const skinnedCount=[];
@@ -325,7 +365,7 @@ function resizeThree(){
  renderer.setSize(w,h,false);
  cam.aspect=w/h;
  cam.updateProjectionMatrix();
- if(modelHolder && RIGS.length) requestAnimationFrame(()=>fitModelToFrame(1.55));
+ if(modelHolder && RIGS.length) requestAnimationFrame(()=>fitModelToFrame(1.85));
 }
 new ResizeObserver(resizeThree).observe(host); resizeThree();
 
