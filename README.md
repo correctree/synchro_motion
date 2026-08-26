@@ -1,11 +1,12 @@
-# synchro_motion
+# synchro_motion v8
 
-GitHub Pages 用ファイルです。
+GitHub Pages 用です。
 
-リポジトリのルート直下に次の2ファイルを置いてください。
-
+ルート直下:
 - index.html
 - vibeman_02.glb
 
-GitHub > Settings > Pages で、Deploy from a branch / main / root を指定してください。
-カメラは HTTPS 上で利用してください。
+今回の修正:
+- isBone 判定を廃止し、mixamorig: ノード名から直接33ジョイントを取得
+- モデル全体の実寸 Box3 でセンタリング
+- 画面内へ余白付き自動FIT
