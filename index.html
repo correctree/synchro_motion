@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-<title>VIBEMAN Motion Capture v10.1</title>
+<title>VIBEMAN Motion Capture v11</title>
 <style>
 :root{color-scheme:dark;--bg:#0a0a0a;--panel:#141414;--line:#2a2a2a;--text:#f5f5f5;--muted:#9a9a9a;--accent:#f4ff66}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow-x:hidden}
@@ -16,10 +16,10 @@ video,.poseCanvas,#three{position:absolute;inset:0;width:100%;height:100%;displa
 </style>
 </head>
 <body>
-<header><div class="brand">VIBEMAN / MOTION CAPTURE v10.1</div><div id="status" class="status">INITIALIZING…</div></header>
+<header><div class="brand">VIBEMAN / MOTION CAPTURE v11</div><div id="status" class="status">INITIALIZING…</div></header>
 <main>
   <section id="cameraStage" class="stage camera"><div class="label">WEBCAM / 33 LANDMARKS</div><video id="video" playsinline muted></video><canvas id="poseCanvas" class="poseCanvas"></canvas><div id="cameraNotice" class="notice">START CAMERA を押してください。<br>全身が画面に入る距離がおすすめです。</div></section>
-  <section class="stage"><div class="label">VIBEMAN / CAMERA CENTER FIT</div><div id="three"></div><div id="modelNotice" class="notice">3D MODEL LOADING…</div></section>
+  <section class="stage"><div class="label">VIBEMAN / ROBUST CENTER FIT</div><div id="three"></div><div id="modelNotice" class="notice">3D MODEL LOADING…</div></section>
 </main>
 <div class="controls">
   <button id="startBtn" class="primary">START CAMERA</button>
@@ -30,6 +30,8 @@ video,.poseCanvas,#three{position:absolute;inset:0;width:100%;height:100%;displa
     <input id="modelSize" type="range" min="0.20" max="1.20" step="0.01" value="0.65">
     <span id="modelSizeVal">65%</span>
   </label>
+  <label>MODEL X <input id="modelX" type="range" min="-1.5" max="1.5" step="0.01" value="0"><span id="modelXVal">0</span></label>
+  <label>MODEL Y <input id="modelY" type="range" min="-1.5" max="1.5" step="0.01" value="0"><span id="modelYVal">0</span></label>
   <label>FOLLOW <input id="follow" type="range" min="0" max="1" step="0.01" value="0.55"><span id="followVal">55%</span></label>
   <label>BODY MOVE <input id="move" type="range" min="0" max="2" step="0.05" value="0.30"><span id="moveVal">30%</span></label>
   <label><input id="mirror" type="checkbox" checked> MIRROR</label>
@@ -74,11 +76,12 @@ import { FilesetResolver, PoseLandmarker } from 'https://cdn.jsdelivr.net/npm/@m
 
 const $=s=>document.querySelector(s);
 const video=$('#video'), overlay=$('#poseCanvas'), octx=overlay.getContext('2d');
-const startBtn=$('#startBtn'), switchBtn=$('#switchBtn'), resetBtn=$('#resetBtn');
+const startBtn=$('#startBtn'), switchBtn=$('#switchBtn'), resetBtn=$('#resetBtn'), fitBtn=$('#fitBtn');
 const cameraStage=$('#cameraStage'), cameraNotice=$('#cameraNotice'), modelNotice=$('#modelNotice');
 const statusEl=$('#status'), poseDot=$('#poseDot'), poseState=$('#poseState'), fpsEl=$('#fps');
 const followInput=$('#follow'), moveInput=$('#move'), mirrorInput=$('#mirror');
 const followVal=$('#followVal'), moveVal=$('#moveVal');
+const modelSize=$('#modelSize'), modelSizeVal=$('#modelSizeVal'), modelX=$('#modelX'), modelXVal=$('#modelXVal'), modelY=$('#modelY'), modelYVal=$('#modelYVal');
 let stream=null, facingMode='user', poseLandmarker=null, model=null, modelHolder=null, fittedBaseScale=1, lastVideoTime=-1, running=false;
 let lastFpsT=performance.now(), frames=0, fps=0, latestPose=null;
 
@@ -177,7 +180,14 @@ function resetPose(){
  }
  model.updateMatrixWorld(true);
 }
-resetBtn.addEventListener('click',()=>{resetPose(); requestAnimationFrame(()=>fitModelToFrame(1.70));});
+resetBtn.addEventListener('click',()=>{resetPose(); requestAnimationFrame(()=>fitModelToFrame(1.55));});
+
+function percentile(sorted,p){
+ if(!sorted.length)return 0;
+ const i=(sorted.length-1)*p;
+ const lo=Math.floor(i), hi=Math.ceil(i), t=i-lo;
+ return sorted[lo]*(1-t)+sorted[hi]*t;
+}
 
 function getSkinnedMeshBounds(){
  if(!model || !modelHolder)return null;
@@ -185,42 +195,40 @@ function getSkinnedMeshBounds(){
  modelHolder.updateMatrixWorld(true);
  model.updateMatrixWorld(true);
 
- const box=new THREE.Box3();
+ const xs=[], ys=[], zs=[];
  const v=new THREE.Vector3();
- let found=false;
 
  model.traverse(o=>{
    if(!o.visible || !o.isSkinnedMesh || !o.geometry)return;
-
    const pos=o.geometry.attributes?.position;
    if(!pos)return;
 
    o.skeleton?.update();
 
-   // Exact visual bounds: evaluate the current skinned position of every vertex.
    for(let i=0;i<pos.count;i++){
      v.fromBufferAttribute(pos,i);
-
-     // Current Three.js SkinnedMesh API.
-     if(typeof o.applyBoneTransform==='function'){
-       o.applyBoneTransform(i,v);
-     }else if(typeof o.boneTransform==='function'){
-       o.boneTransform(i,v);
-     }
-
+     if(typeof o.applyBoneTransform==='function') o.applyBoneTransform(i,v);
+     else if(typeof o.boneTransform==='function') o.boneTransform(i,v);
      v.applyMatrix4(o.matrixWorld);
 
      if([v.x,v.y,v.z].every(Number.isFinite)){
-       box.expandByPoint(v);
-       found=true;
+       xs.push(v.x); ys.push(v.y); zs.push(v.z);
      }
    }
  });
 
- if(!found || box.isEmpty())return null;
+ if(xs.length<8)return null;
+ xs.sort((a,b)=>a-b); ys.sort((a,b)=>a-b); zs.sort((a,b)=>a-b);
+
+ // Ignore the outermost 2% of vertices on each side. This prevents stray/exported
+ // vertices from pulling the visual center away from the actual character.
+ const box=new THREE.Box3(
+   new THREE.Vector3(percentile(xs,.02),percentile(ys,.02),percentile(zs,.02)),
+   new THREE.Vector3(percentile(xs,.98),percentile(ys,.98),percentile(zs,.98))
+ );
 
  const size=box.getSize(new THREE.Vector3());
- const margin=Math.max(size.x,size.y,size.z,0.001)*0.10;
+ const margin=Math.max(size.x,size.y,size.z,0.001)*0.08;
  box.expandByScalar(margin);
  return box;
 }
@@ -254,7 +262,6 @@ function getModelBounds(){
 function normalizeModel(){
  if(!modelHolder || !RIGS[0])return;
 
- // Keep the exported rig hierarchy untouched.
  modelHolder.position.set(0,0,0);
  modelHolder.rotation.set(0,0,0);
  modelHolder.scale.set(1,1,1);
@@ -263,7 +270,6 @@ function normalizeModel(){
 
  const box=getModelBounds();
  if(!box)return;
-
  const size=box.getSize(new THREE.Vector3());
  const maxDim=Math.max(size.x,size.y,size.z,0.001);
  const targetMax=0.82;
@@ -275,41 +281,46 @@ function normalizeModel(){
  model.updateMatrixWorld(true);
 }
 
-function fitModelToFrame(padding=1.70){
+function fitModelToFrame(padding=1.55){
  if(!modelHolder || !RIGS[0])return;
 
  modelHolder.updateMatrixWorld(true);
  model.updateMatrixWorld(true);
-
  const box=getModelBounds();
  if(!box)return;
 
  const size=box.getSize(new THREE.Vector3());
  const center=box.getCenter(new THREE.Vector3());
 
+ // Manual offsets are applied in camera/world X-Y after automatic robust centering.
+ center.x += +modelX.value || 0;
+ center.y += +modelY.value || 0;
+
  const vFov=THREE.MathUtils.degToRad(cam.fov);
  const hFov=2*Math.atan(Math.tan(vFov/2)*Math.max(cam.aspect,0.01));
+ const distV=(size.y*.5)/Math.max(Math.tan(vFov/2),.001);
+ const distH=(size.x*.5)/Math.max(Math.tan(hFov/2),.001);
+ const dist=Math.max(distV,distH,size.z*1.35,.8)*padding;
 
- const distV=(size.y*0.5)/Math.max(Math.tan(vFov/2),0.001);
- const distH=(size.x*0.5)/Math.max(Math.tan(hFov/2),0.001);
- const dist=Math.max(distV,distH,size.z*1.4,0.8)*padding;
-
- // Do not move the model. Aim the camera at the actual rendered mesh center.
  orbit.target.copy(center);
  cam.position.set(center.x,center.y,center.z+dist);
- cam.near=Math.max(0.005,dist/500);
+ cam.near=Math.max(.005,dist/500);
  cam.far=Math.max(50,dist*50);
  cam.updateProjectionMatrix();
  orbit.update();
 
- console.info('FIT MODEL / CAMERA CENTER', {
+ console.info('FIT MODEL / ROBUST',{
    center:{x:center.x,y:center.y,z:center.z},
    size:{x:size.x,y:size.y,z:size.z},
    distance:dist
  });
 }
 
-fitBtn.addEventListener('click',()=>{ normalizeModel(); requestAnimationFrame(()=>fitModelToFrame(1.70)); });
+fitBtn.addEventListener('click',()=>{
+ normalizeModel();
+ requestAnimationFrame(()=>fitModelToFrame(1.55));
+});
+
 modelSize.addEventListener('input',()=>{
  const factor=Math.max(.2,Math.min(1.2,+modelSize.value||.65));
  modelSizeVal.textContent=Math.round(factor*100)+'%';
@@ -317,9 +328,17 @@ modelSize.addEventListener('input',()=>{
    modelHolder.scale.setScalar(fittedBaseScale*factor/.65);
    modelHolder.updateMatrixWorld(true);
    model.updateMatrixWorld(true);
-   requestAnimationFrame(()=>fitModelToFrame(1.70));
+   requestAnimationFrame(()=>fitModelToFrame(1.55));
  }
 });
+
+function updateModelOffset(){
+ modelXVal.textContent=(+modelX.value).toFixed(2);
+ modelYVal.textContent=(+modelY.value).toFixed(2);
+ requestAnimationFrame(()=>fitModelToFrame(1.55));
+}
+modelX.addEventListener('input',updateModelOffset);
+modelY.addEventListener('input',updateModelOffset);
 
 new GLTFLoader().load('./vibeman_02.glb',gltf=>{
  model=gltf.scene;
@@ -348,7 +367,7 @@ new GLTFLoader().load('./vibeman_02.glb',gltf=>{
  requestAnimationFrame(()=>{
    model.updateMatrixWorld(true);
    normalizeModel();
-   requestAnimationFrame(()=>fitModelToFrame(1.70));
+   requestAnimationFrame(()=>fitModelToFrame(1.55));
  });
 
  modelNotice.hidden=true;
@@ -373,7 +392,7 @@ function resizeThree(){
  renderer.setSize(w,h,false);
  cam.aspect=w/h;
  cam.updateProjectionMatrix();
- if(modelHolder && RIGS.length) requestAnimationFrame(()=>fitModelToFrame(1.70));
+ if(modelHolder && RIGS.length) requestAnimationFrame(()=>fitModelToFrame(1.55));
 }
 new ResizeObserver(resizeThree).observe(host); resizeThree();
 
