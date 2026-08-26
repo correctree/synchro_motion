@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-<title>VIBEMAN Motion Capture v11</title>
+<title>VIBEMAN Motion Capture v11.1</title>
 <style>
 :root{color-scheme:dark;--bg:#0a0a0a;--panel:#141414;--line:#2a2a2a;--text:#f5f5f5;--muted:#9a9a9a;--accent:#f4ff66}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow-x:hidden}
@@ -16,7 +16,7 @@ video,.poseCanvas,#three{position:absolute;inset:0;width:100%;height:100%;displa
 </style>
 </head>
 <body>
-<header><div class="brand">VIBEMAN / MOTION CAPTURE v11</div><div id="status" class="status">INITIALIZING…</div></header>
+<header><div class="brand">VIBEMAN / MOTION CAPTURE v11.1</div><div id="status" class="status">INITIALIZING…</div></header>
 <main>
   <section id="cameraStage" class="stage camera"><div class="label">WEBCAM / 33 LANDMARKS</div><video id="video" playsinline muted></video><canvas id="poseCanvas" class="poseCanvas"></canvas><div id="cameraNotice" class="notice">START CAMERA を押してください。<br>全身が画面に入る距離がおすすめです。</div></section>
   <section class="stage"><div class="label">VIBEMAN / ROBUST CENTER FIT</div><div id="three"></div><div id="modelNotice" class="notice">3D MODEL LOADING…</div></section>
@@ -34,7 +34,7 @@ video,.poseCanvas,#three{position:absolute;inset:0;width:100%;height:100%;displa
   <label>MODEL Y <input id="modelY" type="range" min="-1.5" max="1.5" step="0.01" value="0"><span id="modelYVal">0</span></label>
   <label>FOLLOW <input id="follow" type="range" min="0" max="1" step="0.01" value="0.55"><span id="followVal">55%</span></label>
   <label>BODY MOVE <input id="move" type="range" min="0" max="2" step="0.05" value="0.30"><span id="moveVal">30%</span></label>
-  <label><input id="mirror" type="checkbox" checked> MIRROR</label>
+  <label><input id="mirror" type="checkbox" checked> MIRROR VIDEO</label>
   <div class="meter"><span id="poseDot" class="dot"></span><span id="poseState">POSE: WAITING</span><span id="fps">0 FPS</span></div>
 </div>
 
@@ -496,15 +496,17 @@ function applyPose(world){
  const a=Math.min(.88,Math.max(.02,+followInput.value));
 
  // Limbs
- applyBoneDirection('LeftArm',dir(world,11,13),a);
- applyBoneDirection('LeftForeArm',dir(world,13,15),a);
- applyBoneDirection('RightArm',dir(world,12,14),a);
- applyBoneDirection('RightForeArm',dir(world,14,16),a);
+ // MediaPipe landmark indices are anatomical left/right, regardless of mirrored preview.
+ // vibeman_02.glb is facing the camera, so swap the anatomical sides for visual mirroring.
+ applyBoneDirection('LeftArm',dir(world,12,14),a);
+ applyBoneDirection('LeftForeArm',dir(world,14,16),a);
+ applyBoneDirection('RightArm',dir(world,11,13),a);
+ applyBoneDirection('RightForeArm',dir(world,13,15),a);
 
- applyBoneDirection('LeftUpLeg',dir(world,23,25),a*.82);
- applyBoneDirection('LeftLeg',dir(world,25,27),a*.82);
- applyBoneDirection('RightUpLeg',dir(world,24,26),a*.82);
- applyBoneDirection('RightLeg',dir(world,26,28),a*.82);
+ applyBoneDirection('LeftUpLeg',dir(world,24,26),a*.82);
+ applyBoneDirection('LeftLeg',dir(world,26,28),a*.82);
+ applyBoneDirection('RightUpLeg',dir(world,23,25),a*.82);
+ applyBoneDirection('RightLeg',dir(world,25,27),a*.82);
 
  // Torso
  const hipC=avg(V(world[23]),V(world[24]));
@@ -526,7 +528,7 @@ function applyPose(world){
    const hipImgY=(lm[23].y+lm[24].y)/2;
    if(Number.isFinite(hipImgX)&&Number.isFinite(hipImgY)){
      const mv=+moveInput.value;
-     const dx=((hipImgX-.5)*(mirrorInput.checked?-1:1))*mv;
+     const dx=(hipImgX-.5)*mv;
      const dy=(.62-hipImgY)*mv*.55;
      moveHips(dx,dy,a*.12);
    }
