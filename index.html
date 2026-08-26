@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-<title>VIBEMAN Motion Capture v11.1</title>
+<title>VIBEMAN Motion Capture v11.2</title>
 <style>
 :root{color-scheme:dark;--bg:#0a0a0a;--panel:#141414;--line:#2a2a2a;--text:#f5f5f5;--muted:#9a9a9a;--accent:#f4ff66}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow-x:hidden}
@@ -16,7 +16,7 @@ video,.poseCanvas,#three{position:absolute;inset:0;width:100%;height:100%;displa
 </style>
 </head>
 <body>
-<header><div class="brand">VIBEMAN / MOTION CAPTURE v11.1</div><div id="status" class="status">INITIALIZING…</div></header>
+<header><div class="brand">VIBEMAN / MOTION CAPTURE v11.2</div><div id="status" class="status">INITIALIZING…</div></header>
 <main>
   <section id="cameraStage" class="stage camera"><div class="label">WEBCAM / 33 LANDMARKS</div><video id="video" playsinline muted></video><canvas id="poseCanvas" class="poseCanvas"></canvas><div id="cameraNotice" class="notice">START CAMERA を押してください。<br>全身が画面に入る距離がおすすめです。</div></section>
   <section class="stage"><div class="label">VIBEMAN / ROBUST CENTER FIT</div><div id="three"></div><div id="modelNotice" class="notice">3D MODEL LOADING…</div></section>
@@ -34,6 +34,8 @@ video,.poseCanvas,#three{position:absolute;inset:0;width:100%;height:100%;displa
   <label>MODEL Y <input id="modelY" type="range" min="-1.5" max="1.5" step="0.01" value="0"><span id="modelYVal">0</span></label>
   <label>FOLLOW <input id="follow" type="range" min="0" max="1" step="0.01" value="0.55"><span id="followVal">55%</span></label>
   <label>BODY MOVE <input id="move" type="range" min="0" max="2" step="0.05" value="0.30"><span id="moveVal">30%</span></label>
+  <label><input id="closeRange" type="checkbox" checked> CLOSE RANGE</label>
+  <label>SMOOTH <input id="smooth" type="range" min="0.05" max="0.45" step="0.01" value="0.16"><span id="smoothVal">16%</span></label>
   <label><input id="mirror" type="checkbox" checked> MIRROR VIDEO</label>
   <div class="meter"><span id="poseDot" class="dot"></span><span id="poseState">POSE: WAITING</span><span id="fps">0 FPS</span></div>
 </div>
@@ -79,14 +81,15 @@ const video=$('#video'), overlay=$('#poseCanvas'), octx=overlay.getContext('2d')
 const startBtn=$('#startBtn'), switchBtn=$('#switchBtn'), resetBtn=$('#resetBtn'), fitBtn=$('#fitBtn');
 const cameraStage=$('#cameraStage'), cameraNotice=$('#cameraNotice'), modelNotice=$('#modelNotice');
 const statusEl=$('#status'), poseDot=$('#poseDot'), poseState=$('#poseState'), fpsEl=$('#fps');
-const followInput=$('#follow'), moveInput=$('#move'), mirrorInput=$('#mirror');
-const followVal=$('#followVal'), moveVal=$('#moveVal');
+const followInput=$('#follow'), moveInput=$('#move'), mirrorInput=$('#mirror'), closeRangeInput=$('#closeRange'), smoothInput=$('#smooth');
+const followVal=$('#followVal'), moveVal=$('#moveVal'), smoothVal=$('#smoothVal');
 const modelSize=$('#modelSize'), modelSizeVal=$('#modelSizeVal'), modelX=$('#modelX'), modelXVal=$('#modelXVal'), modelY=$('#modelY'), modelYVal=$('#modelYVal');
 let stream=null, facingMode='user', poseLandmarker=null, model=null, modelHolder=null, fittedBaseScale=1, lastVideoTime=-1, running=false;
 let lastFpsT=performance.now(), frames=0, fps=0, latestPose=null;
 
 followInput.addEventListener('input',()=>followVal.textContent=Math.round(+followInput.value*100)+'%');
 moveInput.addEventListener('input',()=>moveVal.textContent=Math.round(+moveInput.value*100)+'%');
+smoothInput.addEventListener('input',()=>smoothVal.textContent=Math.round(+smoothInput.value*100)+'%');
 mirrorInput.addEventListener('change',()=>cameraStage.classList.toggle('noMirror',!mirrorInput.checked));
 
 // ---------- Three.js ----------
@@ -429,6 +432,7 @@ async function initPose(){
  }
 }
 async function startCamera(){
+ smoothInitialized=false; smoothWorld.length=0; lastReliableWorld.length=0;
  try{
    await initPose(); if(stream)stream.getTracks().forEach(t=>t.stop());
    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:facingMode},width:{ideal:1280},height:{ideal:720}},audio:false});
@@ -456,6 +460,78 @@ function drawPose(lms){
 }
 
 // MediaPipe world landmark -> Three world direction. Mirror x when selfie view is enabled.
+
+const smoothWorld=[];
+const lastReliableWorld=[];
+let smoothInitialized=false;
+
+function copyLandmark(p){
+ return {x:+p.x||0,y:+p.y||0,z:+p.z||0,visibility:Number.isFinite(p.visibility)?p.visibility:1,presence:Number.isFinite(p.presence)?p.presence:1};
+}
+function lerpLandmark(a,b,t){
+ if(!a)return copyLandmark(b);
+ return {
+   x:THREE.MathUtils.lerp(a.x,b.x,t),
+   y:THREE.MathUtils.lerp(a.y,b.y,t),
+   z:THREE.MathUtils.lerp(a.z,b.z,t),
+   visibility:b.visibility ?? a.visibility ?? 1,
+   presence:b.presence ?? a.presence ?? 1
+ };
+}
+function confidence(p){
+ if(!p)return 0;
+ const v=Number.isFinite(p.visibility)?p.visibility:1;
+ const pr=Number.isFinite(p.presence)?p.presence:1;
+ return Math.min(v,pr);
+}
+function extrapolateLeg(world,hipIdx,kneeIdx,ankleIdx,footIdx,side){
+ const hip=world[hipIdx];
+ if(!hip)return;
+ const shL=world[11], shR=world[12], hipL=world[23], hipR=world[24];
+ if(!shL||!shR||!hipL||!hipR)return;
+ const shoulderWidth=Math.hypot(shL.x-shR.x,shL.y-shR.y,shL.z-shR.z) || .25;
+ const hipWidth=Math.hypot(hipL.x-hipR.x,hipL.y-hipR.y,hipL.z-hipR.z) || shoulderWidth*.75;
+ const legLen=Math.max(shoulderWidth*2.25, hipWidth*2.7, .45);
+ const thigh=legLen*.52, shin=legLen*.48;
+ const lateral=(side==='L'?-1:1)*hipWidth*.06;
+ const targetK={x:hip.x+lateral,y:hip.y+thigh,z:hip.z+shoulderWidth*.04,visibility:.5,presence:.5};
+ const targetA={x:targetK.x+lateral*.25,y:targetK.y+shin,z:targetK.z+shoulderWidth*.02,visibility:.45,presence:.45};
+ if(!world[kneeIdx] || confidence(world[kneeIdx])<.35) world[kneeIdx]=targetK;
+ if(!world[ankleIdx] || confidence(world[ankleIdx])<.30) world[ankleIdx]=targetA;
+ if(footIdx!=null && (!world[footIdx] || confidence(world[footIdx])<.25)){
+   world[footIdx]={x:world[ankleIdx].x,y:world[ankleIdx].y+shoulderWidth*.10,z:world[ankleIdx].z-shoulderWidth*.22,visibility:.4,presence:.4};
+ }
+}
+function prepareWorld(raw){
+ if(!raw)return raw;
+ const arr=raw.map(copyLandmark);
+
+ for(let i=0;i<arr.length;i++){
+   if(confidence(arr[i])>.45) lastReliableWorld[i]=copyLandmark(arr[i]);
+ }
+
+ if(closeRangeInput.checked){
+   for(const i of [23,24,25,26,27,28,29,30,31,32]){
+     if(confidence(arr[i])<.30 && lastReliableWorld[i]) arr[i]=copyLandmark(lastReliableWorld[i]);
+   }
+   extrapolateLeg(arr,23,25,27,31,'L');
+   extrapolateLeg(arr,24,26,28,32,'R');
+ }
+
+ const t=Math.max(.04,Math.min(.5,+smoothInput.value||.16));
+ if(!smoothInitialized){
+   for(let i=0;i<arr.length;i++) smoothWorld[i]=copyLandmark(arr[i]);
+   smoothInitialized=true;
+ }else{
+   for(let i=0;i<arr.length;i++){
+     const c=confidence(arr[i]);
+     const localT=c>.65?t:Math.max(.04,t*.45);
+     smoothWorld[i]=lerpLandmark(smoothWorld[i],arr[i],localT);
+   }
+ }
+ return smoothWorld;
+}
+
 function V(l){const sx=mirrorInput.checked?-1:1;return new THREE.Vector3(sx*l.x,-l.y,-l.z)}
 function dir(lms,a,b){return V(lms[b]).sub(V(lms[a])).normalize()}
 function avg(a,b){return a.clone().add(b).multiplyScalar(.5)}
@@ -475,7 +551,7 @@ function applyBoneDirection(name,targetWorld,alpha){
 
    // Avoid single-frame flips from noisy pose estimates.
    if(Number.isFinite(desired.x)&&Number.isFinite(desired.y)&&Number.isFinite(desired.z)&&Number.isFinite(desired.w)){
-     b.quaternion.slerp(desired,alpha);
+     if(b.quaternion.angleTo(desired)>0.0025) b.quaternion.slerp(desired,alpha);
    }
  }
 }
@@ -493,7 +569,10 @@ function moveHips(dx,dy,alpha){
 }
 function applyPose(world){
  if(!model||!world||RIGS.length===0)return;
- const a=Math.min(.88,Math.max(.02,+followInput.value));
+ world=prepareWorld(world);
+ const userFollow=Math.min(.88,Math.max(.02,+followInput.value));
+ const smoothFactor=Math.max(.05,Math.min(.45,+smoothInput.value||.16));
+ const a=Math.min(.72,userFollow*(0.55+smoothFactor));
 
  // Limbs
  // MediaPipe landmark indices are anatomical left/right, regardless of mirrored preview.
