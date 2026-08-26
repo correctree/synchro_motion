@@ -31,10 +31,40 @@ video,.poseCanvas,#three{position:absolute;inset:0;width:100%;height:100%;displa
   <div class="meter"><span id="poseDot" class="dot"></span><span id="poseState">POSE: WAITING</span><span id="fps">0 FPS</span></div>
 </div>
 
+<script>
+window.addEventListener('error', (e) => {
+  const status = document.getElementById('status');
+  const notice = document.getElementById('modelNotice');
+  if (status) status.textContent = 'STARTUP ERROR';
+  if (notice) {
+    notice.hidden = false;
+    notice.textContent = '起動エラー: ' + (e.message || 'JavaScript module load failed');
+  }
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const status = document.getElementById('status');
+  const notice = document.getElementById('modelNotice');
+  if (status) status.textContent = 'STARTUP ERROR';
+  if (notice) {
+    notice.hidden = false;
+    notice.textContent = '起動エラー: ' + (e.reason?.message || e.reason || 'Unhandled promise rejection');
+  }
+});
+</script>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.1/examples/jsm/"
+  }
+}
+</script>
+
 <script type="module">
-import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.js';
-import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.185.1/examples/jsm/loaders/GLTFLoader.js';
-import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.185.1/examples/jsm/controls/OrbitControls.js';
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FilesetResolver, PoseLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/+esm';
 
 const $=s=>document.querySelector(s);
@@ -92,8 +122,13 @@ new GLTFLoader().load('./vibeman_01.glb',gltf=>{
  model.updateMatrixWorld(true);
  boneNames.forEach(n=>BONES[n]=findNamed(model,n));
  storeRest();
- modelNotice.hidden=true; statusEl.textContent='MODEL READY / CAMERA OFF';
-},undefined,err=>{console.error(err);modelNotice.textContent='MODEL LOAD ERROR\nindex.html と vibeman_01.glb を同じフォルダに置いてください。';statusEl.textContent='MODEL ERROR'});
+ modelNotice.hidden=true; statusEl.textContent='MODEL READY / CAMERA OFF'; console.info('GLB loaded:',gltf);
+},undefined,err=>{
+ console.error(err);
+ modelNotice.hidden=false;
+ modelNotice.textContent='MODEL LOAD ERROR：vibeman_01.glb が同じフォルダにあるか確認してください。';
+ statusEl.textContent='MODEL ERROR';
+});
 
 function resizeThree(){const w=host.clientWidth,h=host.clientHeight;if(!w||!h)return;renderer.setSize(w,h,false);cam.aspect=w/h;cam.updateProjectionMatrix()}
 new ResizeObserver(resizeThree).observe(host); resizeThree();
@@ -102,19 +137,45 @@ new ResizeObserver(resizeThree).observe(host); resizeThree();
 async function initPose(){
  if(poseLandmarker)return;
  statusEl.textContent='LOADING MEDIAPIPE…';
- const vision=await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm');
- poseLandmarker=await PoseLandmarker.createFromOptions(vision,{
-   baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',delegate:'GPU'},
-   runningMode:'VIDEO',numPoses:1,minPoseDetectionConfidence:.55,minPosePresenceConfidence:.55,minTrackingConfidence:.55
- });
- statusEl.textContent='MEDIAPIPE READY';
+ const wasmRoot='https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm';
+ const modelUrl='https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
+ const vision=await FilesetResolver.forVisionTasks(wasmRoot);
+
+ const common={
+   runningMode:'VIDEO',
+   numPoses:1,
+   minPoseDetectionConfidence:.55,
+   minPosePresenceConfidence:.55,
+   minTrackingConfidence:.55
+ };
+
+ try{
+   poseLandmarker=await PoseLandmarker.createFromOptions(vision,{
+     ...common,
+     baseOptions:{modelAssetPath:modelUrl,delegate:'GPU'}
+   });
+   statusEl.textContent='MEDIAPIPE READY / GPU';
+ }catch(gpuErr){
+   console.warn('MediaPipe GPU init failed; retrying with CPU.',gpuErr);
+   statusEl.textContent='GPU FAILED / TRYING CPU…';
+   poseLandmarker=await PoseLandmarker.createFromOptions(vision,{
+     ...common,
+     baseOptions:{modelAssetPath:modelUrl,delegate:'CPU'}
+   });
+   statusEl.textContent='MEDIAPIPE READY / CPU';
+ }
 }
 async function startCamera(){
  try{
    await initPose(); if(stream)stream.getTracks().forEach(t=>t.stop());
    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:facingMode},width:{ideal:1280},height:{ideal:720}},audio:false});
    video.srcObject=stream; await video.play(); running=true; cameraNotice.hidden=true; startBtn.textContent='CAMERA ON'; statusEl.textContent='TRACKING';
- }catch(e){console.error(e);cameraNotice.hidden=false;cameraNotice.innerHTML='カメラを起動できません。<br>HTTPS / localhost とカメラ許可を確認してください。';statusEl.textContent='CAMERA ERROR'}
+ }catch(e){
+   console.error(e);
+   cameraNotice.hidden=false;
+   cameraNotice.innerHTML='カメラを起動できません。<br>'+String(e?.name||'')+' '+String(e?.message||'')+'<br>HTTPS とカメラ許可を確認してください。';
+   statusEl.textContent='CAMERA ERROR';
+ }
 }
 startBtn.addEventListener('click',startCamera);
 switchBtn.addEventListener('click',async()=>{facingMode=facingMode==='user'?'environment':'user';await startCamera()});
