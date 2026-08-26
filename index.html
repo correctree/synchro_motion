@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-<title>VIBEMAN Motion Capture v11.2</title>
+<title>VIBEMAN Motion Capture v11.3</title>
 <style>
 :root{color-scheme:dark;--bg:#0a0a0a;--panel:#141414;--line:#2a2a2a;--text:#f5f5f5;--muted:#9a9a9a;--accent:#f4ff66}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow-x:hidden}
@@ -16,7 +16,7 @@ video,.poseCanvas,#three{position:absolute;inset:0;width:100%;height:100%;displa
 </style>
 </head>
 <body>
-<header><div class="brand">VIBEMAN / MOTION CAPTURE v11.2</div><div id="status" class="status">INITIALIZING…</div></header>
+<header><div class="brand">VIBEMAN / MOTION CAPTURE v11.3</div><div id="status" class="status">INITIALIZING…</div></header>
 <main>
   <section id="cameraStage" class="stage camera"><div class="label">WEBCAM / 33 LANDMARKS</div><video id="video" playsinline muted></video><canvas id="poseCanvas" class="poseCanvas"></canvas><div id="cameraNotice" class="notice">START CAMERA を押してください。<br>全身が画面に入る距離がおすすめです。</div></section>
   <section class="stage"><div class="label">VIBEMAN / ROBUST CENTER FIT</div><div id="three"></div><div id="modelNotice" class="notice">3D MODEL LOADING…</div></section>
@@ -34,6 +34,7 @@ video,.poseCanvas,#three{position:absolute;inset:0;width:100%;height:100%;displa
   <label>MODEL Y <input id="modelY" type="range" min="-1.5" max="1.5" step="0.01" value="0"><span id="modelYVal">0</span></label>
   <label>FOLLOW <input id="follow" type="range" min="0" max="1" step="0.01" value="0.55"><span id="followVal">55%</span></label>
   <label>BODY MOVE <input id="move" type="range" min="0" max="2" step="0.05" value="0.30"><span id="moveVal">30%</span></label>
+  <label>BODY DEPTH <input id="depthMove" type="range" min="0" max="2.0" step="0.01" value="0.65"><span id="depthVal">65%</span></label>
   <label><input id="closeRange" type="checkbox" checked> CLOSE RANGE</label>
   <label>SMOOTH <input id="smooth" type="range" min="0.05" max="0.45" step="0.01" value="0.16"><span id="smoothVal">16%</span></label>
   <label><input id="mirror" type="checkbox" checked> MIRROR VIDEO</label>
@@ -81,14 +82,15 @@ const video=$('#video'), overlay=$('#poseCanvas'), octx=overlay.getContext('2d')
 const startBtn=$('#startBtn'), switchBtn=$('#switchBtn'), resetBtn=$('#resetBtn'), fitBtn=$('#fitBtn');
 const cameraStage=$('#cameraStage'), cameraNotice=$('#cameraNotice'), modelNotice=$('#modelNotice');
 const statusEl=$('#status'), poseDot=$('#poseDot'), poseState=$('#poseState'), fpsEl=$('#fps');
-const followInput=$('#follow'), moveInput=$('#move'), mirrorInput=$('#mirror'), closeRangeInput=$('#closeRange'), smoothInput=$('#smooth');
-const followVal=$('#followVal'), moveVal=$('#moveVal'), smoothVal=$('#smoothVal');
+const followInput=$('#follow'), moveInput=$('#move'), depthInput=$('#depthMove'), mirrorInput=$('#mirror'), closeRangeInput=$('#closeRange'), smoothInput=$('#smooth');
+const followVal=$('#followVal'), moveVal=$('#moveVal'), depthVal=$('#depthVal'), smoothVal=$('#smoothVal');
 const modelSize=$('#modelSize'), modelSizeVal=$('#modelSizeVal'), modelX=$('#modelX'), modelXVal=$('#modelXVal'), modelY=$('#modelY'), modelYVal=$('#modelYVal');
 let stream=null, facingMode='user', poseLandmarker=null, model=null, modelHolder=null, fittedBaseScale=1, lastVideoTime=-1, running=false;
 let lastFpsT=performance.now(), frames=0, fps=0, latestPose=null;
 
 followInput.addEventListener('input',()=>followVal.textContent=Math.round(+followInput.value*100)+'%');
 moveInput.addEventListener('input',()=>moveVal.textContent=Math.round(+moveInput.value*100)+'%');
+depthInput.addEventListener('input',()=>depthVal.textContent=Math.round(+depthInput.value*100)+'%');
 smoothInput.addEventListener('input',()=>smoothVal.textContent=Math.round(+smoothInput.value*100)+'%');
 mirrorInput.addEventListener('change',()=>cameraStage.classList.toggle('noMirror',!mirrorInput.checked));
 
@@ -183,7 +185,7 @@ function resetPose(){
  }
  model.updateMatrixWorld(true);
 }
-resetBtn.addEventListener('click',()=>{resetPose(); requestAnimationFrame(()=>fitModelToFrame(1.55));});
+resetBtn.addEventListener('click',()=>{resetPose(); depthInitialized=false; depthBaseline=0; smoothDepth=0; requestAnimationFrame(()=>fitModelToFrame(1.55));});
 
 function percentile(sorted,p){
  if(!sorted.length)return 0;
@@ -432,7 +434,7 @@ async function initPose(){
  }
 }
 async function startCamera(){
- smoothInitialized=false; smoothWorld.length=0; lastReliableWorld.length=0;
+ smoothInitialized=false; smoothWorld.length=0; lastReliableWorld.length=0; depthInitialized=false; depthBaseline=0; smoothDepth=0;
  try{
    await initPose(); if(stream)stream.getTracks().forEach(t=>t.stop());
    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:facingMode},width:{ideal:1280},height:{ideal:720}},audio:false});
@@ -464,6 +466,9 @@ function drawPose(lms){
 const smoothWorld=[];
 const lastReliableWorld=[];
 let smoothInitialized=false;
+let depthInitialized=false;
+let depthBaseline=0;
+let smoothDepth=0;
 
 function copyLandmark(p){
  return {x:+p.x||0,y:+p.y||0,z:+p.z||0,visibility:Number.isFinite(p.visibility)?p.visibility:1,presence:Number.isFinite(p.presence)?p.presence:1};
@@ -555,16 +560,18 @@ function applyBoneDirection(name,targetWorld,alpha){
    }
  }
 }
-function moveHips(dx,dy,alpha){
+function moveHips(dx,dy,dz,alpha){
  for(const rig of RIGS){
    const b=rig.bones.Hips, rest=rig.rest.Hips;
    if(!b||!rest)continue;
 
-   // Mixamo hip translations are in armature-local units.
-   // Keep translation deliberately small; rotation carries most of the motion.
-   const gain=0.28;
-   b.position.x=THREE.MathUtils.lerp(b.position.x,rest.pos.x+dx*gain,alpha);
-   b.position.y=THREE.MathUtils.lerp(b.position.y,rest.pos.y+dy*gain,alpha);
+   // Keep the horizontal/vertical gain conservative.
+   const gainXY=0.28;
+   const gainZ=0.40;
+
+   b.position.x=THREE.MathUtils.lerp(b.position.x,rest.pos.x+dx*gainXY,alpha);
+   b.position.y=THREE.MathUtils.lerp(b.position.y,rest.pos.y+dy*gainXY,alpha);
+   b.position.z=THREE.MathUtils.lerp(b.position.z,rest.pos.z+dz*gainZ,alpha);
  }
 }
 function applyPose(world){
@@ -600,16 +607,45 @@ function applyPose(world){
  const headDir=V(world[0]).sub(shC).normalize();
  applyBoneDirection('Neck',headDir,a*.18);
 
- // Conservative body translation.
+ // 3D body translation (X / Y / Z)
  const lm=latestPose?.landmarks?.[0];
- if(lm && lm[23] && lm[24]){
+ if(lm && lm[11] && lm[12] && lm[23] && lm[24]){
    const hipImgX=(lm[23].x+lm[24].x)/2;
    const hipImgY=(lm[23].y+lm[24].y)/2;
+
    if(Number.isFinite(hipImgX)&&Number.isFinite(hipImgY)){
      const mv=+moveInput.value;
      const dx=(hipImgX-.5)*mv;
      const dy=(.62-hipImgY)*mv*.55;
-     moveHips(dx,dy,a*.12);
+
+     // Estimate forward/backward motion from two cues:
+     // 1) MediaPipe world-space hip depth.
+     // 2) Apparent shoulder width in the camera image.
+     // Combining both is more stable than using either alone.
+     const worldHipZ=(world[23].z+world[24].z)*.5;
+     const shoulderPx=Math.hypot(lm[11].x-lm[12].x,lm[11].y-lm[12].y);
+
+     // Larger apparent shoulder width = closer to the camera.
+     // World Landmark Z generally becomes more negative when closer.
+     const depthSignal=(-worldHipZ)*0.72 + shoulderPx*0.28;
+
+     if(!depthInitialized){
+       depthBaseline=depthSignal;
+       smoothDepth=0;
+       depthInitialized=true;
+     }
+
+     const depthAmount=+depthInput.value;
+     const rawDepth=(depthSignal-depthBaseline)*depthAmount*2.8;
+
+     // Depth gets its own low-pass filter because Z is noisier than X/Y.
+     const depthT=Math.max(.04,Math.min(.22,(+smoothInput.value||.16)*.75));
+     smoothDepth=THREE.MathUtils.lerp(smoothDepth,rawDepth,depthT);
+
+     // Three.js model forward is negative Z here, so invert for intuitive motion.
+     const dz=-smoothDepth;
+
+     moveHips(dx,dy,dz,a*.12);
    }
  }
  model.updateMatrixWorld(true);
