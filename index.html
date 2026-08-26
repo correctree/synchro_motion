@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-<title>VIBEMAN Motion Capture v11.3</title>
+<title>VIBEMAN Motion Capture v11.4</title>
 <style>
 :root{color-scheme:dark;--bg:#0a0a0a;--panel:#141414;--line:#2a2a2a;--text:#f5f5f5;--muted:#9a9a9a;--accent:#f4ff66}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow-x:hidden}
@@ -16,7 +16,7 @@ video,.poseCanvas,#three{position:absolute;inset:0;width:100%;height:100%;displa
 </style>
 </head>
 <body>
-<header><div class="brand">VIBEMAN / MOTION CAPTURE v11.3</div><div id="status" class="status">INITIALIZING…</div></header>
+<header><div class="brand">VIBEMAN / MOTION CAPTURE v11.4</div><div id="status" class="status">INITIALIZING…</div></header>
 <main>
   <section id="cameraStage" class="stage camera"><div class="label">WEBCAM / 33 LANDMARKS</div><video id="video" playsinline muted></video><canvas id="poseCanvas" class="poseCanvas"></canvas><div id="cameraNotice" class="notice">START CAMERA を押してください。<br>全身が画面に入る距離がおすすめです。</div></section>
   <section class="stage"><div class="label">VIBEMAN / ROBUST CENTER FIT</div><div id="three"></div><div id="modelNotice" class="notice">3D MODEL LOADING…</div></section>
@@ -75,7 +75,7 @@ window.addEventListener('unhandledrejection', (e) => {
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { FilesetResolver, PoseLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/+esm';
+import { FilesetResolver, PoseLandmarker, FaceLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/+esm';
 
 const $=s=>document.querySelector(s);
 const video=$('#video'), overlay=$('#poseCanvas'), octx=overlay.getContext('2d');
@@ -85,7 +85,7 @@ const statusEl=$('#status'), poseDot=$('#poseDot'), poseState=$('#poseState'), f
 const followInput=$('#follow'), moveInput=$('#move'), depthInput=$('#depthMove'), mirrorInput=$('#mirror'), closeRangeInput=$('#closeRange'), smoothInput=$('#smooth');
 const followVal=$('#followVal'), moveVal=$('#moveVal'), depthVal=$('#depthVal'), smoothVal=$('#smoothVal');
 const modelSize=$('#modelSize'), modelSizeVal=$('#modelSizeVal'), modelX=$('#modelX'), modelXVal=$('#modelXVal'), modelY=$('#modelY'), modelYVal=$('#modelYVal');
-let stream=null, facingMode='user', poseLandmarker=null, model=null, modelHolder=null, fittedBaseScale=1, lastVideoTime=-1, running=false;
+let stream=null, facingMode='user', poseLandmarker=null, faceLandmarker=null, visionFileset=null, model=null, modelHolder=null, fittedBaseScale=1, lastVideoTime=-1, running=false;
 let lastFpsT=performance.now(), frames=0, fps=0, latestPose=null;
 
 followInput.addEventListener('input',()=>followVal.textContent=Math.round(+followInput.value*100)+'%');
@@ -185,7 +185,7 @@ function resetPose(){
  }
  model.updateMatrixWorld(true);
 }
-resetBtn.addEventListener('click',()=>{resetPose(); depthInitialized=false; depthBaseline=0; smoothDepth=0; requestAnimationFrame(()=>fitModelToFrame(1.55));});
+resetBtn.addEventListener('click',()=>{resetPose(); faceBaselineQ=null; smoothFaceDelta.identity(); faceTracking=false; depthInitialized=false; depthBaseline=0; smoothDepth=0; requestAnimationFrame(()=>fitModelToFrame(1.55));});
 
 function percentile(sorted,p){
  if(!sorted.length)return 0;
@@ -402,14 +402,17 @@ function resizeThree(){
 new ResizeObserver(resizeThree).observe(host); resizeThree();
 
 // ---------- MediaPipe ----------
-async function initPose(){
- if(poseLandmarker)return;
+async function initTracking(){
+ if(poseLandmarker && faceLandmarker)return;
+
  statusEl.textContent='LOADING MEDIAPIPE…';
  const wasmRoot='https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm';
- const modelUrl='https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
- const vision=await FilesetResolver.forVisionTasks(wasmRoot);
+ if(!visionFileset) visionFileset=await FilesetResolver.forVisionTasks(wasmRoot);
 
- const common={
+ const poseModel='https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
+ const faceModel='https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+
+ const poseCommon={
    runningMode:'VIDEO',
    numPoses:1,
    minPoseDetectionConfidence:.55,
@@ -417,26 +420,52 @@ async function initPose(){
    minTrackingConfidence:.55
  };
 
- try{
-   poseLandmarker=await PoseLandmarker.createFromOptions(vision,{
-     ...common,
-     baseOptions:{modelAssetPath:modelUrl,delegate:'GPU'}
-   });
-   statusEl.textContent='MEDIAPIPE READY / GPU';
- }catch(gpuErr){
-   console.warn('MediaPipe GPU init failed; retrying with CPU.',gpuErr);
-   statusEl.textContent='GPU FAILED / TRYING CPU…';
-   poseLandmarker=await PoseLandmarker.createFromOptions(vision,{
-     ...common,
-     baseOptions:{modelAssetPath:modelUrl,delegate:'CPU'}
-   });
-   statusEl.textContent='MEDIAPIPE READY / CPU';
+ if(!poseLandmarker){
+   try{
+     poseLandmarker=await PoseLandmarker.createFromOptions(visionFileset,{
+       ...poseCommon,
+       baseOptions:{modelAssetPath:poseModel,delegate:'GPU'}
+     });
+   }catch(gpuErr){
+     console.warn('Pose GPU init failed; retrying with CPU.',gpuErr);
+     poseLandmarker=await PoseLandmarker.createFromOptions(visionFileset,{
+       ...poseCommon,
+       baseOptions:{modelAssetPath:poseModel,delegate:'CPU'}
+     });
+   }
  }
+
+ if(!faceLandmarker){
+   const faceCommon={
+     runningMode:'VIDEO',
+     numFaces:1,
+     minFaceDetectionConfidence:.5,
+     minFacePresenceConfidence:.5,
+     minTrackingConfidence:.5,
+     outputFaceBlendshapes:false,
+     outputFacialTransformationMatrixes:true
+   };
+
+   try{
+     faceLandmarker=await FaceLandmarker.createFromOptions(visionFileset,{
+       ...faceCommon,
+       baseOptions:{modelAssetPath:faceModel,delegate:'GPU'}
+     });
+   }catch(gpuErr){
+     console.warn('Face GPU init failed; retrying with CPU.',gpuErr);
+     faceLandmarker=await FaceLandmarker.createFromOptions(visionFileset,{
+       ...faceCommon,
+       baseOptions:{modelAssetPath:faceModel,delegate:'CPU'}
+     });
+   }
+ }
+
+ statusEl.textContent='POSE + FACE READY';
 }
 async function startCamera(){
- smoothInitialized=false; smoothWorld.length=0; lastReliableWorld.length=0; depthInitialized=false; depthBaseline=0; smoothDepth=0;
+ smoothInitialized=false; smoothWorld.length=0; lastReliableWorld.length=0; depthInitialized=false; depthBaseline=0; smoothDepth=0; faceBaselineQ=null; smoothFaceDelta.identity(); faceTracking=false; lastFaceSeen=0;
  try{
-   await initPose(); if(stream)stream.getTracks().forEach(t=>t.stop());
+   await initTracking(); if(stream)stream.getTracks().forEach(t=>t.stop());
    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:facingMode},width:{ideal:1280},height:{ideal:720}},audio:false});
    video.srcObject=stream; await video.play(); running=true; cameraNotice.hidden=true; startBtn.textContent='CAMERA ON'; statusEl.textContent='TRACKING';
  }catch(e){
@@ -469,6 +498,11 @@ let smoothInitialized=false;
 let depthInitialized=false;
 let depthBaseline=0;
 let smoothDepth=0;
+let faceBaselineQ=null;
+let smoothFaceDelta=new THREE.Quaternion();
+let faceTracking=false;
+let lastFaceSeen=0;
+
 
 function copyLandmark(p){
  return {x:+p.x||0,y:+p.y||0,z:+p.z||0,visibility:Number.isFinite(p.visibility)?p.visibility:1,presence:Number.isFinite(p.presence)?p.presence:1};
@@ -574,6 +608,88 @@ function moveHips(dx,dy,dz,alpha){
    b.position.z=THREE.MathUtils.lerp(b.position.z,rest.pos.z+dz*gainZ,alpha);
  }
 }
+
+function quaternionFromFaceMatrix(matrixData){
+ const d=matrixData?.data || matrixData;
+ if(!d || d.length<16)return null;
+
+ // MediaPipe returns a 4x4 facial transformation matrix.
+ const m=new THREE.Matrix4();
+ m.fromArray(Array.from(d));
+
+ const pos=new THREE.Vector3(), q=new THREE.Quaternion(), scale=new THREE.Vector3();
+ m.decompose(pos,q,scale);
+ if(![q.x,q.y,q.z,q.w].every(Number.isFinite))return null;
+ return q.normalize();
+}
+
+function applyWorldDeltaToBone(name,worldDelta,weight,alpha){
+ for(const rig of RIGS){
+   const b=rig.bones[name], rest=rig.rest[name];
+   if(!b||!rest)return;
+
+   model.updateMatrixWorld(true);
+
+   const parentQ=new THREE.Quaternion();
+   if(b.parent)b.parent.getWorldQuaternion(parentQ); else parentQ.identity();
+
+   // Convert camera/world-space head rotation into the bone parent's local coordinates.
+   const localDelta=parentQ.clone().invert()
+     .multiply(worldDelta)
+     .multiply(parentQ)
+     .normalize();
+
+   const identity=new THREE.Quaternion();
+   const weighted=identity.slerp(localDelta,weight);
+   const desired=weighted.multiply(rest.q.clone()).normalize();
+
+   if([desired.x,desired.y,desired.z,desired.w].every(Number.isFinite)){
+     if(b.quaternion.angleTo(desired)>.0015) b.quaternion.slerp(desired,alpha);
+   }
+ }
+}
+
+function applyFaceTracking(faceResult,alpha){
+ const mat=faceResult?.facialTransformationMatrixes?.[0];
+ const currentQ=quaternionFromFaceMatrix(mat);
+ if(!currentQ)return false;
+
+ // First valid face frame becomes the neutral head orientation.
+ if(!faceBaselineQ){
+   faceBaselineQ=currentQ.clone();
+   smoothFaceDelta.identity();
+   return true;
+ }
+
+ // Relative camera/world rotation from the neutral face orientation.
+ let delta=currentQ.clone().multiply(faceBaselineQ.clone().invert()).normalize();
+
+ // The front camera preview is mirrored visually. Mirror the yaw/roll component
+ // so the character turns in the same apparent direction as the user.
+ const e=new THREE.Euler().setFromQuaternion(delta,'YXZ');
+ if(mirrorInput.checked){
+   e.y*=-1;
+   e.z*=-1;
+ }
+ // Prevent occasional extreme FaceLandmarker flips.
+ e.x=THREE.MathUtils.clamp(e.x,-1.05,1.05);
+ e.y=THREE.MathUtils.clamp(e.y,-1.25,1.25);
+ e.z=THREE.MathUtils.clamp(e.z,-.75,.75);
+ delta.setFromEuler(e).normalize();
+
+ // Face-specific smoothing. Slightly quicker than body smoothing.
+ const faceT=Math.max(.10,Math.min(.42,(+smoothInput.value||.16)*1.45));
+ smoothFaceDelta.slerp(delta,faceT);
+
+ // Split natural head rotation between neck and head.
+ applyWorldDeltaToBone('Neck',smoothFaceDelta,.35,Math.min(.55,alpha*.72));
+ applyWorldDeltaToBone('Head',smoothFaceDelta,.72,Math.min(.68,alpha*.92));
+
+ faceTracking=true;
+ lastFaceSeen=performance.now();
+ return true;
+}
+
 function applyPose(world){
  if(!model||!world||RIGS.length===0)return;
  world=prepareWorld(world);
@@ -603,9 +719,12 @@ function applyPose(world){
  applyBoneDirection('Spine1',torso,a*.34);
  applyBoneDirection('Spine2',torso,a*.40);
 
- // Head/neck: reduced gain for stability.
- const headDir=V(world[0]).sub(shC).normalize();
- applyBoneDirection('Neck',headDir,a*.18);
+ // Head/neck is normally driven by Face Landmarker.
+ // Pose nose direction is used only as a fallback when the face is temporarily lost.
+ if(!faceTracking || performance.now()-lastFaceSeen>250){
+   const headDir=V(world[0]).sub(shC).normalize();
+   applyBoneDirection('Neck',headDir,a*.12);
+ }
 
  // 3D body translation (X / Y / Z)
  const lm=latestPose?.landmarks?.[0];
@@ -653,13 +772,41 @@ function applyPose(world){
 
 async function detect(){
  if(!running||!poseLandmarker||video.readyState<2)return;
- if(video.currentTime===lastVideoTime)return; lastVideoTime=video.currentTime;
+ if(video.currentTime===lastVideoTime)return;
+ lastVideoTime=video.currentTime;
+
  try{
-  const res=poseLandmarker.detectForVideo(video,performance.now()); latestPose=res;
-  const lm=res.landmarks?.[0], wm=res.worldLandmarks?.[0]; drawPose(lm);
-  const visible=!!(lm&&wm&&lm[11]&&lm[12]&&lm[23]&&lm[24]); poseDot.classList.toggle('on',visible);poseState.textContent=visible?'POSE: TRACKING':'POSE: SEARCHING';
-  if(visible)applyPose(wm);
- }catch(e){console.warn(e)}
+   const now=performance.now();
+
+   const poseRes=poseLandmarker.detectForVideo(video,now);
+   latestPose=poseRes;
+
+   let faceRes=null;
+   if(faceLandmarker){
+     try{
+       faceRes=faceLandmarker.detectForVideo(video,now);
+       const userFollow=Math.min(.88,Math.max(.02,+followInput.value));
+       const faceOK=applyFaceTracking(faceRes,userFollow);
+       if(!faceOK && performance.now()-lastFaceSeen>250) faceTracking=false;
+     }catch(faceErr){
+       console.warn('Face tracking:',faceErr);
+       if(performance.now()-lastFaceSeen>250) faceTracking=false;
+     }
+   }
+
+   const lm=poseRes.landmarks?.[0], wm=poseRes.worldLandmarks?.[0];
+   drawPose(lm);
+
+   const visible=!!(lm&&wm&&lm[11]&&lm[12]&&lm[23]&&lm[24]);
+   poseDot.classList.toggle('on',visible);
+   poseState.textContent=visible
+     ? (faceTracking?'POSE + FACE: TRACKING':'POSE: TRACKING')
+     : 'POSE: SEARCHING';
+
+   if(visible)applyPose(wm);
+ }catch(e){
+   console.warn(e);
+ }
 }
 
 function loop(){requestAnimationFrame(loop);detect();orbit.update();renderer.render(scene,cam);frames++;const now=performance.now();if(now-lastFpsT>500){fps=Math.round(frames*1000/(now-lastFpsT));frames=0;lastFpsT=now;fpsEl.textContent=fps+' FPS'}}loop();
