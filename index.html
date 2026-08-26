@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-<title>VIBEMAN Motion Capture</title>
+<title>VIBEMAN Motion Capture v2</title>
 <style>
 :root{color-scheme:dark;--bg:#0a0a0a;--panel:#141414;--line:#2a2a2a;--text:#f5f5f5;--muted:#9a9a9a;--accent:#f4ff66}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow-x:hidden}
@@ -16,7 +16,7 @@ video,.poseCanvas,#three{position:absolute;inset:0;width:100%;height:100%;displa
 </style>
 </head>
 <body>
-<header><div class="brand">VIBEMAN / MOTION CAPTURE</div><div id="status" class="status">INITIALIZING…</div></header>
+<header><div class="brand">VIBEMAN / MOTION CAPTURE v2</div><div id="status" class="status">INITIALIZING…</div></header>
 <main>
   <section id="cameraStage" class="stage camera"><div class="label">WEBCAM / 33 LANDMARKS</div><video id="video" playsinline muted></video><canvas id="poseCanvas" class="poseCanvas"></canvas><div id="cameraNotice" class="notice">START CAMERA を押してください。<br>全身が画面に入る距離がおすすめです。</div></section>
   <section class="stage"><div class="label">VIBEMAN / RETARGETED BONES</div><div id="three"></div><div id="modelNotice" class="notice">3D MODEL LOADING…</div></section>
@@ -25,8 +25,8 @@ video,.poseCanvas,#three{position:absolute;inset:0;width:100%;height:100%;displa
   <button id="startBtn" class="primary">START CAMERA</button>
   <button id="switchBtn">SWITCH CAMERA</button>
   <button id="resetBtn">RESET POSE</button>
-  <label>FOLLOW <input id="follow" type="range" min="0" max="1" step="0.01" value="0.72"><span id="followVal">72%</span></label>
-  <label>BODY MOVE <input id="move" type="range" min="0" max="2" step="0.05" value="0.65"><span id="moveVal">65%</span></label>
+  <label>FOLLOW <input id="follow" type="range" min="0" max="1" step="0.01" value="0.55"><span id="followVal">55%</span></label>
+  <label>BODY MOVE <input id="move" type="range" min="0" max="2" step="0.05" value="0.30"><span id="moveVal">30%</span></label>
   <label><input id="mirror" type="checkbox" checked> MIRROR</label>
   <div class="meter"><span id="poseDot" class="dot"></span><span id="poseState">POSE: WAITING</span><span id="fps">0 FPS</span></div>
 </div>
@@ -92,7 +92,7 @@ const key=new THREE.DirectionalLight(0xffffff,3.2); key.position.set(2,4,3); sce
 const rim=new THREE.DirectionalLight(0x99bbff,1.7); rim.position.set(-3,2,-2); scene.add(rim);
 const floor=new THREE.Mesh(new THREE.CircleGeometry(1.2,64),new THREE.MeshStandardMaterial({color:0x181818,roughness:1})); floor.rotation.x=-Math.PI/2; floor.position.y=0; scene.add(floor);
 
-const BONES={}; const REST={};
+const RIGS=[];
 const boneNames=['Hips','Spine','Spine1','Spine2','Neck','Head','LeftShoulder','LeftArm','LeftForeArm','LeftHand','RightShoulder','RightArm','RightForeArm','RightHand','LeftUpLeg','LeftLeg','LeftFoot','RightUpLeg','RightLeg','RightFoot'];
 const childName={
  Hips:'Spine',Spine:'Spine1',Spine1:'Spine2',Spine2:'Neck',Neck:'Head',
@@ -100,29 +100,109 @@ const childName={
  RightShoulder:'RightArm',RightArm:'RightForeArm',RightForeArm:'RightHand',
  LeftUpLeg:'LeftLeg',LeftLeg:'LeftFoot',RightUpLeg:'RightLeg',RightLeg:'RightFoot'
 };
-function findNamed(root,name){let found=null;root.traverse(o=>{if(!found&&(o.name===`mixamorig:${name}`||o.name.endsWith(`:${name}`)))found=o});return found}
-function storeRest(){
- model.updateMatrixWorld(true);
- for(const n of boneNames){const b=BONES[n]; if(!b)continue; REST[n]={q:b.quaternion.clone(),pos:b.position.clone()};}
- for(const [n,c] of Object.entries(childName)){
-   const b=BONES[n], ch=BONES[c]; if(!b||!ch)continue;
-   const bp=new THREE.Vector3(), cp=new THREE.Vector3(); b.getWorldPosition(bp); ch.getWorldPosition(cp);
-   const parentQ=new THREE.Quaternion(); if(b.parent)b.parent.getWorldQuaternion(parentQ); else parentQ.identity();
-   REST[n].dirParent=cp.sub(bp).normalize().applyQuaternion(parentQ.invert()).normalize();
+function findAllNamed(root,name){
+ const arr=[];
+ root.traverse(o=>{
+   if(o.isBone && (o.name===`mixamorig:${name}`||o.name.endsWith(`:${name}`))) arr.push(o);
+ });
+ return arr;
+}
+function buildRigs(){
+ RIGS.length=0;
+ const hips=findAllNamed(model,'Hips');
+ for(const hip of hips){
+   const rig={bones:{},rest:{}};
+   let armature=hip.parent;
+   for(const n of boneNames){
+     let found=null;
+     hip.traverse(o=>{
+       if(!found && o.isBone && (o.name===`mixamorig:${n}`||o.name.endsWith(`:${n}`))) found=o;
+     });
+     if(n==='Hips') found=hip;
+     rig.bones[n]=found;
+   }
+   rig.armature=armature;
+   RIGS.push(rig);
  }
 }
-function resetPose(){if(!model)return;for(const n of boneNames){if(BONES[n]&&REST[n]){BONES[n].quaternion.copy(REST[n].q);BONES[n].position.copy(REST[n].pos)}}model.updateMatrixWorld(true)}
+function storeRest(){
+ model.updateMatrixWorld(true);
+ for(const rig of RIGS){
+   for(const n of boneNames){
+     const b=rig.bones[n];
+     if(!b)continue;
+     rig.rest[n]={q:b.quaternion.clone(),pos:b.position.clone()};
+   }
+   for(const [n,c] of Object.entries(childName)){
+     const b=rig.bones[n], ch=rig.bones[c];
+     if(!b||!ch||!rig.rest[n])continue;
+     const bp=new THREE.Vector3(), cp=new THREE.Vector3();
+     b.getWorldPosition(bp); ch.getWorldPosition(cp);
+     const parentQ=new THREE.Quaternion();
+     if(b.parent)b.parent.getWorldQuaternion(parentQ); else parentQ.identity();
+     rig.rest[n].dirParent=cp.sub(bp).normalize().applyQuaternion(parentQ.clone().invert()).normalize();
+   }
+ }
+}
+function resetPose(){
+ if(!model)return;
+ for(const rig of RIGS){
+   for(const n of boneNames){
+     const b=rig.bones[n], r=rig.rest[n];
+     if(b&&r){b.quaternion.copy(r.q);b.position.copy(r.pos);}
+   }
+ }
+ model.updateMatrixWorld(true);
+}
 resetBtn.addEventListener('click',resetPose);
 
 new GLTFLoader().load('./vibeman_01.glb',gltf=>{
- model=gltf.scene; scene.add(model);
- // Disable embedded animation by simply not creating an AnimationMixer.
- const box=new THREE.Box3().setFromObject(model), size=box.getSize(new THREE.Vector3()), center=box.getCenter(new THREE.Vector3());
- const s=1.75/Math.max(size.y,0.001); model.scale.setScalar(s); model.position.x-=center.x*s; model.position.y-=box.min.y*s; model.position.z-=center.z*s;
+ model=gltf.scene;
+
+ // Hide the two very large helper/background planes exported with the GLB.
+ model.traverse(o=>{
+   if(o.isMesh && (o.name==='平面' || o.name==='平面.001')) o.visible=false;
+ });
+
+ scene.add(model);
+
+ // Build one rig entry for each duplicated Mixamo skeleton.
+ buildRigs();
+
+ // Frame only visible skinned meshes, not the huge helper planes.
  model.updateMatrixWorld(true);
- boneNames.forEach(n=>BONES[n]=findNamed(model,n));
+ const box=new THREE.Box3();
+ let hasSkinned=false;
+ model.traverse(o=>{
+   if(o.isSkinnedMesh && o.visible){
+     if(!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+     const b=o.geometry.boundingBox.clone().applyMatrix4(o.matrixWorld);
+     box.union(b);
+     hasSkinned=true;
+   }
+ });
+ if(hasSkinned && !box.isEmpty()){
+   const size=box.getSize(new THREE.Vector3());
+   const center=box.getCenter(new THREE.Vector3());
+   const targetHeight=2.25;
+   const s=targetHeight/Math.max(size.y,0.001);
+   model.scale.multiplyScalar(s);
+   model.position.x-=center.x*s;
+   model.position.y-=box.min.y*s;
+   model.position.z-=center.z*s;
+ }
+
+ model.updateMatrixWorld(true);
  storeRest();
- modelNotice.hidden=true; statusEl.textContent='MODEL READY / CAMERA OFF'; console.info('GLB loaded:',gltf);
+
+ // Camera framed for a standing character.
+ cam.position.set(0,1.15,4.2);
+ orbit.target.set(0,1.1,0);
+ orbit.update();
+
+ modelNotice.hidden=true;
+ statusEl.textContent=`MODEL READY / ${RIGS.length} RIGS`;
+ console.info('GLB loaded:',gltf,'rigs:',RIGS.length);
 },undefined,err=>{
  console.error(err);
  modelNotice.hidden=false;
@@ -197,28 +277,77 @@ function V(l){const sx=mirrorInput.checked?-1:1;return new THREE.Vector3(sx*l.x,
 function dir(lms,a,b){return V(lms[b]).sub(V(lms[a])).normalize()}
 function avg(a,b){return a.clone().add(b).multiplyScalar(.5)}
 function applyBoneDirection(name,targetWorld,alpha){
- const b=BONES[name], rest=REST[name]; if(!b||!rest?.dirParent||!targetWorld||targetWorld.lengthSq()<1e-8)return;
- model.updateMatrixWorld(true);
- const parentQ=new THREE.Quaternion(); if(b.parent)b.parent.getWorldQuaternion(parentQ); else parentQ.identity();
- const t=targetWorld.clone().normalize().applyQuaternion(parentQ.invert()).normalize();
- const delta=new THREE.Quaternion().setFromUnitVectors(rest.dirParent,t);
- const desired=delta.multiply(rest.q.clone()).normalize(); b.quaternion.slerp(desired,alpha);
+ if(!targetWorld||targetWorld.lengthSq()<1e-8)return;
+ for(const rig of RIGS){
+   const b=rig.bones[name], rest=rig.rest[name];
+   if(!b||!rest?.dirParent)continue;
+
+   model.updateMatrixWorld(true);
+   const parentQ=new THREE.Quaternion();
+   if(b.parent)b.parent.getWorldQuaternion(parentQ); else parentQ.identity();
+
+   const t=targetWorld.clone().normalize().applyQuaternion(parentQ.clone().invert()).normalize();
+   const delta=new THREE.Quaternion().setFromUnitVectors(rest.dirParent,t);
+   const desired=delta.multiply(rest.q.clone()).normalize();
+
+   // Avoid single-frame flips from noisy pose estimates.
+   if(Number.isFinite(desired.x)&&Number.isFinite(desired.y)&&Number.isFinite(desired.z)&&Number.isFinite(desired.w)){
+     b.quaternion.slerp(desired,alpha);
+   }
+ }
+}
+function moveHips(dx,dy,alpha){
+ for(const rig of RIGS){
+   const b=rig.bones.Hips, rest=rig.rest.Hips;
+   if(!b||!rest)continue;
+
+   // Mixamo hip translations are in armature-local units.
+   // Keep translation deliberately small; rotation carries most of the motion.
+   const gain=0.28;
+   b.position.x=THREE.MathUtils.lerp(b.position.x,rest.pos.x+dx*gain,alpha);
+   b.position.y=THREE.MathUtils.lerp(b.position.y,rest.pos.y+dy*gain,alpha);
+ }
 }
 function applyPose(world){
- if(!model||!world)return; const a=Math.min(.95,Math.max(.02,+followInput.value));
- // Arms / forearms
- applyBoneDirection('LeftArm',dir(world,11,13),a); applyBoneDirection('LeftForeArm',dir(world,13,15),a);
- applyBoneDirection('RightArm',dir(world,12,14),a); applyBoneDirection('RightForeArm',dir(world,14,16),a);
- // Legs
- applyBoneDirection('LeftUpLeg',dir(world,23,25),a); applyBoneDirection('LeftLeg',dir(world,25,27),a);
- applyBoneDirection('RightUpLeg',dir(world,24,26),a); applyBoneDirection('RightLeg',dir(world,26,28),a);
- // Torso direction from hip center to shoulder center
- const hipC=avg(V(world[23]),V(world[24])), shC=avg(V(world[11]),V(world[12]));
- const torso=shC.clone().sub(hipC).normalize(); applyBoneDirection('Spine',torso,a*.55); applyBoneDirection('Spine1',torso,a*.55); applyBoneDirection('Spine2',torso,a*.55);
- // Neck/head uses shoulder center toward nose.
- const headDir=V(world[0]).sub(shC).normalize(); applyBoneDirection('Neck',headDir,a*.38);
- // Root horizontal body motion, normalized around image-space center. Keep feet reasonably stable with conservative gain.
- if(BONES.Hips&&REST.Hips){const mv=+moveInput.value;const hipImgX=(latestPose?.landmarks?.[0]?.[23]?.x+latestPose?.landmarks?.[0]?.[24]?.x)/2;const hipImgY=(latestPose?.landmarks?.[0]?.[23]?.y+latestPose?.landmarks?.[0]?.[24]?.y)/2;if(Number.isFinite(hipImgX)){const x=((hipImgX-.5)*(mirrorInput.checked?-1:1))*mv;const y=(.62-hipImgY)*mv*.55;BONES.Hips.position.x=THREE.MathUtils.lerp(BONES.Hips.position.x,REST.Hips.pos.x+x,a*.3);BONES.Hips.position.y=THREE.MathUtils.lerp(BONES.Hips.position.y,REST.Hips.pos.y+y,a*.25)}}
+ if(!model||!world||RIGS.length===0)return;
+ const a=Math.min(.88,Math.max(.02,+followInput.value));
+
+ // Limbs
+ applyBoneDirection('LeftArm',dir(world,11,13),a);
+ applyBoneDirection('LeftForeArm',dir(world,13,15),a);
+ applyBoneDirection('RightArm',dir(world,12,14),a);
+ applyBoneDirection('RightForeArm',dir(world,14,16),a);
+
+ applyBoneDirection('LeftUpLeg',dir(world,23,25),a*.82);
+ applyBoneDirection('LeftLeg',dir(world,25,27),a*.82);
+ applyBoneDirection('RightUpLeg',dir(world,24,26),a*.82);
+ applyBoneDirection('RightLeg',dir(world,26,28),a*.82);
+
+ // Torso
+ const hipC=avg(V(world[23]),V(world[24]));
+ const shC=avg(V(world[11]),V(world[12]));
+ const torso=shC.clone().sub(hipC).normalize();
+
+ applyBoneDirection('Spine',torso,a*.28);
+ applyBoneDirection('Spine1',torso,a*.34);
+ applyBoneDirection('Spine2',torso,a*.40);
+
+ // Head/neck: reduced gain for stability.
+ const headDir=V(world[0]).sub(shC).normalize();
+ applyBoneDirection('Neck',headDir,a*.18);
+
+ // Conservative body translation.
+ const lm=latestPose?.landmarks?.[0];
+ if(lm && lm[23] && lm[24]){
+   const hipImgX=(lm[23].x+lm[24].x)/2;
+   const hipImgY=(lm[23].y+lm[24].y)/2;
+   if(Number.isFinite(hipImgX)&&Number.isFinite(hipImgY)){
+     const mv=+moveInput.value;
+     const dx=((hipImgX-.5)*(mirrorInput.checked?-1:1))*mv;
+     const dy=(.62-hipImgY)*mv*.55;
+     moveHips(dx,dy,a*.12);
+   }
+ }
  model.updateMatrixWorld(true);
 }
 
