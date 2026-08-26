@@ -1,12 +1,13 @@
-# synchro_motion v8
+# synchro_motion v9
 
-GitHub Pages 用です。
+GitHub Pages用。
 
-ルート直下:
+## Files
 - index.html
 - vibeman_02.glb
 
-今回の修正:
-- isBone 判定を廃止し、mixamorig: ノード名から直接33ジョイントを取得
-- モデル全体の実寸 Box3 でセンタリング
-- 画面内へ余白付き自動FIT
+## v9
+- Three.jsのSkinnedMesh.skeleton.bonesから直接ジョイントを取得
+- GLTFLoaderによるノード名サニタイズの影響を回避
+- 記号を除去したボーン名で20主要ボーンをマッピング
+- Skeletonの変換を触らず、外側Groupで表示サイズと中央位置を調整

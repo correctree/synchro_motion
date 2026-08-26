@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-<title>VIBEMAN Motion Capture v8</title>
+<title>VIBEMAN Motion Capture v9</title>
 <style>
 :root{color-scheme:dark;--bg:#0a0a0a;--panel:#141414;--line:#2a2a2a;--text:#f5f5f5;--muted:#9a9a9a;--accent:#f4ff66}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow-x:hidden}
@@ -16,10 +16,10 @@ video,.poseCanvas,#three{position:absolute;inset:0;width:100%;height:100%;displa
 </style>
 </head>
 <body>
-<header><div class="brand">VIBEMAN / MOTION CAPTURE v8</div><div id="status" class="status">INITIALIZING…</div></header>
+<header><div class="brand">VIBEMAN / MOTION CAPTURE v9</div><div id="status" class="status">INITIALIZING…</div></header>
 <main>
   <section id="cameraStage" class="stage camera"><div class="label">WEBCAM / 33 LANDMARKS</div><video id="video" playsinline muted></video><canvas id="poseCanvas" class="poseCanvas"></canvas><div id="cameraNotice" class="notice">START CAMERA を押してください。<br>全身が画面に入る距離がおすすめです。</div></section>
-  <section class="stage"><div class="label">VIBEMAN / SINGLE RIG</div><div id="three"></div><div id="modelNotice" class="notice">3D MODEL LOADING…</div></section>
+  <section class="stage"><div class="label">VIBEMAN / SKELETON DIRECT</div><div id="three"></div><div id="modelNotice" class="notice">3D MODEL LOADING…</div></section>
 </main>
 <div class="controls">
   <button id="startBtn" class="primary">START CAMERA</button>
@@ -101,33 +101,43 @@ const childName={
  RightShoulder:'RightArm',RightArm:'RightForeArm',RightForeArm:'RightHand',
  LeftUpLeg:'LeftLeg',LeftLeg:'LeftFoot',RightUpLeg:'RightLeg',RightLeg:'RightFoot'
 };
-function findAllNamed(root,name){
- const arr=[];
- root.traverse(o=>{
-   if(o.name===`mixamorig:${name}` || o.name.endsWith(`:${name}`)) arr.push(o);
- });
- return arr;
+function normalizeBoneName(name){
+ return String(name||'').toLowerCase().replace(/[^a-z0-9]/g,'');
 }
-function findNamedIn(root,name){
- let found=null;
- root.traverse(o=>{
-   if(!found && (o.name===`mixamorig:${name}` || o.name.endsWith(`:${name}`))) found=o;
- });
- return found;
+function boneKeyMatches(name,key){
+ const n=normalizeBoneName(name);
+ const k=normalizeBoneName(key);
+ return n===k || n.endsWith(k) || n.endsWith('mixamorig'+k);
 }
 function buildRigs(){
  RIGS.length=0;
 
- // vibeman_02.glb has one skin with 33 named Mixamo joints.
- // Resolve by node name instead of relying on Object3D.isBone.
- const hip=findNamedIn(model,'Hips');
- if(!hip)return;
+ // Most reliable source: the bones already bound to the visible SkinnedMesh.
+ let skinned=null;
+ model.traverse(o=>{
+   if(!skinned && o.isSkinnedMesh && o.skeleton?.bones?.length) skinned=o;
+ });
 
- const rig={bones:{},rest:{}};
- for(const n of boneNames){
-   rig.bones[n]=findNamedIn(model,n);
+ if(!skinned){
+   console.warn('No SkinnedMesh with skeleton was found.');
+   return;
  }
- rig.armature=hip.parent;
+
+ const sourceBones=skinned.skeleton.bones;
+ console.info('Skeleton bones:', sourceBones.map(b=>b.name));
+
+ const rig={bones:{},rest:{},skinned};
+ for(const key of boneNames){
+   rig.bones[key]=sourceBones.find(b=>boneKeyMatches(b.name,key)) || null;
+ }
+
+ // Hips is required; other mapped bones are reported independently.
+ if(!rig.bones.Hips){
+   console.warn('Hips bone not found. Available:',sourceBones.map(b=>b.name));
+   return;
+ }
+
+ rig.armature=rig.bones.Hips.parent;
  RIGS.push(rig);
 
  console.table(Object.fromEntries(
@@ -163,57 +173,60 @@ function resetPose(){
  }
  model.updateMatrixWorld(true);
 }
-resetBtn.addEventListener('click',()=>{resetPose(); requestAnimationFrame(()=>fitModelToFrame(1.90));});
+resetBtn.addEventListener('click',()=>{resetPose(); requestAnimationFrame(()=>fitModelToFrame(2.10));});
 
 function getModelBounds(){
- if(!model)return null;
- model.updateMatrixWorld(true);
-
- // setFromObject(expandByObject precise=true) evaluates the actual transformed mesh
- // and is more reliable here than manually using a SkinnedMesh boundingBox.
+ if(!modelHolder)return null;
+ modelHolder.updateMatrixWorld(true);
  const box=new THREE.Box3();
- try{
-   box.setFromObject(model,true);
- }catch(e){
-   console.warn('Precise bounds failed, using normal bounds.',e);
-   box.setFromObject(model);
- }
- if(box.isEmpty())return null;
- const vals=[box.min.x,box.min.y,box.min.z,box.max.x,box.max.y,box.max.z];
- return vals.every(Number.isFinite)?box:null;
+ let found=false;
+
+ model.traverse(o=>{
+   if(!o.visible || !o.isMesh || !o.geometry)return;
+
+   // Geometry bounds in mesh local space; transform to world using current matrix.
+   if(!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+   const local=o.geometry.boundingBox;
+   if(!local)return;
+
+   const b=local.clone().applyMatrix4(o.matrixWorld);
+   if([b.min.x,b.min.y,b.min.z,b.max.x,b.max.y,b.max.z].every(Number.isFinite)){
+     box.union(b);
+     found=true;
+   }
+ });
+
+ return found && !box.isEmpty() ? box : null;
 }
 
 function normalizeModel(){
- if(!model)return;
+ if(!modelHolder)return;
 
- model.position.set(0,0,0);
- model.rotation.set(0,0,0);
- model.scale.set(1,1,1);
- model.updateMatrixWorld(true);
+ modelHolder.position.set(0,0,0);
+ modelHolder.rotation.set(0,0,0);
+ modelHolder.scale.set(1,1,1);
+ modelHolder.updateMatrixWorld(true);
 
  let box=getModelBounds();
  if(!box)return;
 
  const size=box.getSize(new THREE.Vector3());
  const maxDim=Math.max(size.x,size.y,size.z,0.001);
- const targetMax=1.65;
+ const targetMax=1.45;
  const s=targetMax/maxDim;
 
- model.scale.setScalar(s);
- model.updateMatrixWorld(true);
+ modelHolder.scale.setScalar(s);
+ modelHolder.updateMatrixWorld(true);
 
- // Re-measure after scaling and center the actual visible geometry at world origin.
  box=getModelBounds();
  if(!box)return;
  const center=box.getCenter(new THREE.Vector3());
 
- model.position.x-=center.x;
- model.position.y-=center.y;
- model.position.z-=center.z;
- model.updateMatrixWorld(true);
+ modelHolder.position.set(-center.x,-center.y,-center.z);
+ modelHolder.updateMatrixWorld(true);
 }
 
-function fitModelToFrame(padding=1.90){
+function fitModelToFrame(padding=2.10){
  if(!model)return;
  const box=getModelBounds();
  if(!box)return;
@@ -235,12 +248,16 @@ function fitModelToFrame(padding=1.90){
  orbit.update();
 }
 
-fitBtn.addEventListener('click',()=>fitModelToFrame(1.90));
+fitBtn.addEventListener('click',()=>fitModelToFrame(2.10));
 
 new GLTFLoader().load('./vibeman_02.glb',gltf=>{
  model=gltf.scene;
 
- // vibeman_02.glb contains one skinned character and one humanoid rig.
+ // Keep skeleton-local transforms untouched. All display centering/scaling happens on a wrapper.
+ modelHolder=new THREE.Group();
+ scene.add(modelHolder);
+ modelHolder.add(model);
+
  model.traverse(o=>{
    if(o.isMesh){
      o.visible=true;
@@ -250,19 +267,23 @@ new GLTFLoader().load('./vibeman_02.glb',gltf=>{
    }
  });
 
- scene.add(model);
  buildRigs();
 
  // Normalize using the actually skinned character bounds, then auto-fit the camera.
  normalizeModel();
  model.updateMatrixWorld(true);
  storeRest();
- fitModelToFrame(1.90);
- requestAnimationFrame(()=>requestAnimationFrame(()=>fitModelToFrame(1.90)));
+ fitModelToFrame(2.10);
+ requestAnimationFrame(()=>requestAnimationFrame(()=>fitModelToFrame(2.10)));
 
  modelNotice.hidden=true;
+ const skinnedCount=[];
+ model.traverse(o=>{if(o.isSkinnedMesh) skinnedCount.push(o);});
  const mapped=RIGS[0] ? Object.values(RIGS[0].bones).filter(Boolean).length : 0;
- statusEl.textContent=RIGS.length ? `MODEL READY / 1 RIG / ${mapped} BONES` : 'MODEL READY / NO RIG';
+ const totalBones=skinnedCount[0]?.skeleton?.bones?.length || 0;
+ statusEl.textContent=RIGS.length
+   ? `MODEL READY / 1 RIG / ${mapped} MAP / ${totalBones} JOINTS`
+   : `MODEL READY / NO RIG / ${totalBones} JOINTS`;
  console.info('GLB loaded:',gltf,'rigs:',RIGS.length);
 },undefined,err=>{
  console.error(err);
