@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-<title>VIBEMAN Motion Capture v9.1</title>
+<title>VIBEMAN Motion Capture v9.2</title>
 <style>
 :root{color-scheme:dark;--bg:#0a0a0a;--panel:#141414;--line:#2a2a2a;--text:#f5f5f5;--muted:#9a9a9a;--accent:#f4ff66}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow-x:hidden}
@@ -16,7 +16,7 @@ video,.poseCanvas,#three{position:absolute;inset:0;width:100%;height:100%;displa
 </style>
 </head>
 <body>
-<header><div class="brand">VIBEMAN / MOTION CAPTURE v9.1</div><div id="status" class="status">INITIALIZING…</div></header>
+<header><div class="brand">VIBEMAN / MOTION CAPTURE v9.2</div><div id="status" class="status">INITIALIZING…</div></header>
 <main>
   <section id="cameraStage" class="stage camera"><div class="label">WEBCAM / 33 LANDMARKS</div><video id="video" playsinline muted></video><canvas id="poseCanvas" class="poseCanvas"></canvas><div id="cameraNotice" class="notice">START CAMERA を押してください。<br>全身が画面に入る距離がおすすめです。</div></section>
   <section class="stage"><div class="label">VIBEMAN / SKELETON DIRECT</div><div id="three"></div><div id="modelNotice" class="notice">3D MODEL LOADING…</div></section>
@@ -173,62 +173,82 @@ function resetPose(){
  }
  model.updateMatrixWorld(true);
 }
-resetBtn.addEventListener('click',()=>{resetPose(); requestAnimationFrame(()=>fitModelToFrame(2.10));});
+resetBtn.addEventListener('click',()=>{resetPose(); requestAnimationFrame(()=>fitModelToFrame(1.55));});
+
+function getSkeletonBounds(){
+ if(!RIGS[0]?.skinned?.skeleton?.bones?.length)return null;
+
+ modelHolder?.updateMatrixWorld(true);
+ model?.updateMatrixWorld(true);
+
+ const box=new THREE.Box3();
+ const p=new THREE.Vector3();
+ let count=0;
+
+ for(const b of RIGS[0].skinned.skeleton.bones){
+   b.getWorldPosition(p);
+   if([p.x,p.y,p.z].every(Number.isFinite)){
+     box.expandByPoint(p);
+     count++;
+   }
+ }
+
+ if(count<2 || box.isEmpty())return null;
+
+ // Bones lie near joint centers. Add a body-volume margin so head/hands/feet stay visible.
+ const size=box.getSize(new THREE.Vector3());
+ const margin=Math.max(size.x,size.y,size.z,0.001)*0.16;
+ box.min.addScalar(-margin);
+ box.max.addScalar(margin);
+ return box;
+}
 
 function getModelBounds(){
- if(!modelHolder)return null;
- modelHolder.updateMatrixWorld(true);
- const box=new THREE.Box3();
- let found=false;
-
- model.traverse(o=>{
-   if(!o.visible || !o.isMesh || !o.geometry)return;
-
-   // Geometry bounds in mesh local space; transform to world using current matrix.
-   if(!o.geometry.boundingBox) o.geometry.computeBoundingBox();
-   const local=o.geometry.boundingBox;
-   if(!local)return;
-
-   const b=local.clone().applyMatrix4(o.matrixWorld);
-   if([b.min.x,b.min.y,b.min.z,b.max.x,b.max.y,b.max.z].every(Number.isFinite)){
-     box.union(b);
-     found=true;
-   }
- });
-
- return found && !box.isEmpty() ? box : null;
+ // For this rigged model, skeleton positions are considerably more reliable than
+ // the raw geometry bounding box exported from Blender.
+ return getSkeletonBounds();
 }
 
 function normalizeModel(){
- if(!modelHolder)return;
+ if(!modelHolder || !RIGS[0])return;
 
  modelHolder.position.set(0,0,0);
  modelHolder.rotation.set(0,0,0);
  modelHolder.scale.set(1,1,1);
  modelHolder.updateMatrixWorld(true);
+ model.updateMatrixWorld(true);
 
- let box=getModelBounds();
+ let box=getSkeletonBounds();
  if(!box)return;
 
  const size=box.getSize(new THREE.Vector3());
  const maxDim=Math.max(size.x,size.y,size.z,0.001);
- const targetMax=1.45;
- const s=targetMax/maxDim;
 
+ // Keep a comfortable amount of empty space around the doll.
+ const targetMax=1.35;
+ const s=targetMax/maxDim;
  modelHolder.scale.setScalar(s);
  modelHolder.updateMatrixWorld(true);
+ model.updateMatrixWorld(true);
 
- box=getModelBounds();
+ box=getSkeletonBounds();
  if(!box)return;
- const center=box.getCenter(new THREE.Vector3());
 
- modelHolder.position.set(-center.x,-center.y,-center.z);
+ const center=box.getCenter(new THREE.Vector3());
+ modelHolder.position.x-=center.x;
+ modelHolder.position.y-=center.y;
+ modelHolder.position.z-=center.z;
  modelHolder.updateMatrixWorld(true);
+ model.updateMatrixWorld(true);
 }
 
-function fitModelToFrame(padding=2.10){
- if(!model)return;
- const box=getModelBounds();
+function fitModelToFrame(padding=1.55){
+ if(!modelHolder || !RIGS[0])return;
+
+ modelHolder.updateMatrixWorld(true);
+ model.updateMatrixWorld(true);
+
+ const box=getSkeletonBounds();
  if(!box)return;
 
  const size=box.getSize(new THREE.Vector3());
@@ -236,19 +256,26 @@ function fitModelToFrame(padding=2.10){
 
  const vFov=THREE.MathUtils.degToRad(cam.fov);
  const hFov=2*Math.atan(Math.tan(vFov/2)*Math.max(cam.aspect,0.01));
+
  const distV=(size.y*0.5)/Math.max(Math.tan(vFov/2),0.001);
  const distH=(size.x*0.5)/Math.max(Math.tan(hFov/2),0.001);
- const dist=Math.max(distV,distH,size.z*1.5,1.4)*padding;
+ const dist=Math.max(distV,distH,size.z*1.3,0.9)*padding;
 
  orbit.target.copy(center);
  cam.position.set(center.x,center.y,center.z+dist);
- cam.near=Math.max(0.01,dist/100);
- cam.far=Math.max(100,dist*20);
+ cam.near=0.01;
+ cam.far=Math.max(50,dist*30);
  cam.updateProjectionMatrix();
  orbit.update();
+
+ console.info('FIT MODEL', {
+   size:{x:size.x,y:size.y,z:size.z},
+   center:{x:center.x,y:center.y,z:center.z},
+   distance:dist
+ });
 }
 
-fitBtn.addEventListener('click',()=>fitModelToFrame(2.10));
+fitBtn.addEventListener('click',()=>fitModelToFrame(1.55));
 
 new GLTFLoader().load('./vibeman_02.glb',gltf=>{
  model=gltf.scene;
@@ -273,8 +300,8 @@ new GLTFLoader().load('./vibeman_02.glb',gltf=>{
  normalizeModel();
  model.updateMatrixWorld(true);
  storeRest();
- fitModelToFrame(2.10);
- requestAnimationFrame(()=>requestAnimationFrame(()=>fitModelToFrame(2.10)));
+ fitModelToFrame(1.55);
+ requestAnimationFrame(()=>requestAnimationFrame(()=>fitModelToFrame(1.55)));
 
  modelNotice.hidden=true;
  const skinnedCount=[];
@@ -292,7 +319,14 @@ new GLTFLoader().load('./vibeman_02.glb',gltf=>{
  statusEl.textContent='MODEL ERROR';
 });
 
-function resizeThree(){const w=host.clientWidth,h=host.clientHeight;if(!w||!h)return;renderer.setSize(w,h,false);cam.aspect=w/h;cam.updateProjectionMatrix()}
+function resizeThree(){
+ const w=host.clientWidth,h=host.clientHeight;
+ if(!w||!h)return;
+ renderer.setSize(w,h,false);
+ cam.aspect=w/h;
+ cam.updateProjectionMatrix();
+ if(modelHolder && RIGS.length) requestAnimationFrame(()=>fitModelToFrame(1.55));
+}
 new ResizeObserver(resizeThree).observe(host); resizeThree();
 
 // ---------- MediaPipe ----------
