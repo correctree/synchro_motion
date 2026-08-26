@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-<title>VIBEMAN Motion Capture v10</title>
+<title>VIBEMAN Motion Capture v10.1</title>
 <style>
 :root{color-scheme:dark;--bg:#0a0a0a;--panel:#141414;--line:#2a2a2a;--text:#f5f5f5;--muted:#9a9a9a;--accent:#f4ff66}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow-x:hidden}
@@ -16,7 +16,7 @@ video,.poseCanvas,#three{position:absolute;inset:0;width:100%;height:100%;displa
 </style>
 </head>
 <body>
-<header><div class="brand">VIBEMAN / MOTION CAPTURE v10</div><div id="status" class="status">INITIALIZING…</div></header>
+<header><div class="brand">VIBEMAN / MOTION CAPTURE v10.1</div><div id="status" class="status">INITIALIZING…</div></header>
 <main>
   <section id="cameraStage" class="stage camera"><div class="label">WEBCAM / 33 LANDMARKS</div><video id="video" playsinline muted></video><canvas id="poseCanvas" class="poseCanvas"></canvas><div id="cameraNotice" class="notice">START CAMERA を押してください。<br>全身が画面に入る距離がおすすめです。</div></section>
   <section class="stage"><div class="label">VIBEMAN / CAMERA CENTER FIT</div><div id="three"></div><div id="modelNotice" class="notice">3D MODEL LOADING…</div></section>
@@ -177,7 +177,7 @@ function resetPose(){
  }
  model.updateMatrixWorld(true);
 }
-resetBtn.addEventListener('click',()=>{resetPose(); requestAnimationFrame(()=>fitModelToFrame(1.65));}); normalizeModel(); requestAnimationFrame(()=>fitModelToFrame(1.65));});
+resetBtn.addEventListener('click',()=>{resetPose(); requestAnimationFrame(()=>fitModelToFrame(1.70));});
 
 function getSkinnedMeshBounds(){
  if(!model || !modelHolder)return null;
@@ -251,31 +251,21 @@ function getModelBounds(){
  return getSkinnedMeshBounds() || getSkeletonBounds();
 }
 
-function getVisibleCenterAndSize(){
- const box=getModelBounds();
- if(!box)return null;
- return {
-   box,
-   center:box.getCenter(new THREE.Vector3()),
-   size:box.getSize(new THREE.Vector3())
- };
-}
-
 function normalizeModel(){
  if(!modelHolder || !RIGS[0])return;
 
- // Never translate the rig/model to center it.
- // Keep the exported hierarchy untouched and only change the outer scale.
+ // Keep the exported rig hierarchy untouched.
  modelHolder.position.set(0,0,0);
  modelHolder.rotation.set(0,0,0);
  modelHolder.scale.set(1,1,1);
  modelHolder.updateMatrixWorld(true);
  model.updateMatrixWorld(true);
 
- const info=getVisibleCenterAndSize();
- if(!info)return;
+ const box=getModelBounds();
+ if(!box)return;
 
- const maxDim=Math.max(info.size.x,info.size.y,info.size.z,0.001);
+ const size=box.getSize(new THREE.Vector3());
+ const maxDim=Math.max(size.x,size.y,size.z,0.001);
  const targetMax=0.82;
  fittedBaseScale=targetMax/maxDim;
 
@@ -285,26 +275,26 @@ function normalizeModel(){
  model.updateMatrixWorld(true);
 }
 
-function fitModelToFrame(padding=1.65){
+function fitModelToFrame(padding=1.70){
  if(!modelHolder || !RIGS[0])return;
 
  modelHolder.updateMatrixWorld(true);
  model.updateMatrixWorld(true);
 
- const info=getVisibleCenterAndSize();
- if(!info)return;
+ const box=getModelBounds();
+ if(!box)return;
 
- const center=info.center;
- const size=info.size;
+ const size=box.getSize(new THREE.Vector3());
+ const center=box.getCenter(new THREE.Vector3());
 
  const vFov=THREE.MathUtils.degToRad(cam.fov);
  const hFov=2*Math.atan(Math.tan(vFov/2)*Math.max(cam.aspect,0.01));
 
  const distV=(size.y*0.5)/Math.max(Math.tan(vFov/2),0.001);
  const distH=(size.x*0.5)/Math.max(Math.tan(hFov/2),0.001);
- const dist=Math.max(distV,distH,size.z*1.5,0.8)*padding;
+ const dist=Math.max(distV,distH,size.z*1.4,0.8)*padding;
 
- // Key change: keep the model untouched and move the camera to the actual visual center.
+ // Do not move the model. Aim the camera at the actual rendered mesh center.
  orbit.target.copy(center);
  cam.position.set(center.x,center.y,center.z+dist);
  cam.near=Math.max(0.005,dist/500);
@@ -312,24 +302,22 @@ function fitModelToFrame(padding=1.65){
  cam.updateProjectionMatrix();
  orbit.update();
 
- console.info('FIT MODEL / CAMERA ONLY', {
+ console.info('FIT MODEL / CAMERA CENTER', {
    center:{x:center.x,y:center.y,z:center.z},
    size:{x:size.x,y:size.y,z:size.z},
-   camera:{x:cam.position.x,y:cam.position.y,z:cam.position.z},
    distance:dist
  });
 }
 
-fitBtn.addEventListener('click',()=>{ normalizeModel(); requestAnimationFrame(()=>fitModelToFrame(1.65)); }); requestAnimationFrame(()=>fitModelToFrame(1.65)); });
+fitBtn.addEventListener('click',()=>{ normalizeModel(); requestAnimationFrame(()=>fitModelToFrame(1.70)); });
 modelSize.addEventListener('input',()=>{
  const factor=Math.max(.2,Math.min(1.2,+modelSize.value||.65));
  modelSizeVal.textContent=Math.round(factor*100)+'%';
-
  if(modelHolder){
    modelHolder.scale.setScalar(fittedBaseScale*factor/.65);
    modelHolder.updateMatrixWorld(true);
    model.updateMatrixWorld(true);
-   requestAnimationFrame(()=>fitModelToFrame(1.65));
+   requestAnimationFrame(()=>fitModelToFrame(1.70));
  }
 });
 
@@ -360,7 +348,7 @@ new GLTFLoader().load('./vibeman_02.glb',gltf=>{
  requestAnimationFrame(()=>{
    model.updateMatrixWorld(true);
    normalizeModel();
-   requestAnimationFrame(()=>fitModelToFrame(1.65));
+   requestAnimationFrame(()=>fitModelToFrame(1.70));
  });
 
  modelNotice.hidden=true;
@@ -385,7 +373,7 @@ function resizeThree(){
  renderer.setSize(w,h,false);
  cam.aspect=w/h;
  cam.updateProjectionMatrix();
- if(modelHolder && RIGS.length) requestAnimationFrame(()=>fitModelToFrame(1.65));
+ if(modelHolder && RIGS.length) requestAnimationFrame(()=>fitModelToFrame(1.70));
 }
 new ResizeObserver(resizeThree).observe(host); resizeThree();
 
