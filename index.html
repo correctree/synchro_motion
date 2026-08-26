@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-<title>VIBEMAN Motion Capture v9.4.1</title>
+<title>VIBEMAN Motion Capture v9.5</title>
 <style>
 :root{color-scheme:dark;--bg:#0a0a0a;--panel:#141414;--line:#2a2a2a;--text:#f5f5f5;--muted:#9a9a9a;--accent:#f4ff66}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow-x:hidden}
@@ -16,7 +16,7 @@ video,.poseCanvas,#three{position:absolute;inset:0;width:100%;height:100%;displa
 </style>
 </head>
 <body>
-<header><div class="brand">VIBEMAN / MOTION CAPTURE v9.4.1</div><div id="status" class="status">INITIALIZING…</div></header>
+<header><div class="brand">VIBEMAN / MOTION CAPTURE v9.5</div><div id="status" class="status">INITIALIZING…</div></header>
 <main>
   <section id="cameraStage" class="stage camera"><div class="label">WEBCAM / 33 LANDMARKS</div><video id="video" playsinline muted></video><canvas id="poseCanvas" class="poseCanvas"></canvas><div id="cameraNotice" class="notice">START CAMERA を押してください。<br>全身が画面に入る距離がおすすめです。</div></section>
   <section class="stage"><div class="label">VIBEMAN / SKELETON DIRECT</div><div id="three"></div><div id="modelNotice" class="notice">3D MODEL LOADING…</div></section>
@@ -251,6 +251,27 @@ function getModelBounds(){
  return getSkinnedMeshBounds() || getSkeletonBounds();
 }
 
+function recenterVisibleModel(){
+ if(!modelHolder || !model)return;
+
+ modelHolder.updateMatrixWorld(true);
+ model.updateMatrixWorld(true);
+
+ const box=getModelBounds();
+ if(!box)return;
+
+ const center=box.getCenter(new THREE.Vector3());
+
+ // modelHolder is directly under scene, so subtracting the current world center
+ // moves the visible character center to world origin.
+ modelHolder.position.x-=center.x;
+ modelHolder.position.y-=center.y;
+ modelHolder.position.z-=center.z;
+
+ modelHolder.updateMatrixWorld(true);
+ model.updateMatrixWorld(true);
+}
+
 function normalizeModel(){
  if(!modelHolder || !RIGS[0])return;
 
@@ -266,23 +287,17 @@ function normalizeModel(){
  const size=box.getSize(new THREE.Vector3());
  const maxDim=Math.max(size.x,size.y,size.z,0.001);
 
- // Normalize the *visible mesh* rather than the skeleton.
  const targetMax=0.82;
- const s=targetMax/maxDim;
- modelHolder.scale.setScalar(s);
- fittedBaseScale=s;
+ fittedBaseScale=targetMax/maxDim;
+
+ const factor=Math.max(.2,Math.min(1.2,+modelSize.value||.65));
+ modelHolder.scale.setScalar(fittedBaseScale*factor/.65);
  modelHolder.updateMatrixWorld(true);
  model.updateMatrixWorld(true);
 
- box=getModelBounds();
- if(!box)return;
-
- const center=box.getCenter(new THREE.Vector3());
-
- // Holder is directly under the Scene, so these are world-space corrections.
- modelHolder.position.set(-center.x,-center.y,-center.z);
- modelHolder.updateMatrixWorld(true);
- model.updateMatrixWorld(true);
+ // Critical: scaling happens around the exported model origin, not the character center.
+ // Therefore always recenter after the final scale is applied.
+ recenterVisibleModel();
 }
 
 function fitModelToFrame(padding=2.35){
@@ -295,28 +310,38 @@ function fitModelToFrame(padding=2.35){
  if(!box)return;
 
  const size=box.getSize(new THREE.Vector3());
- const center=box.getCenter(new THREE.Vector3());
+
+ // Recenter one final time to eliminate any accumulated drift.
+ recenterVisibleModel();
+
+ // Re-measure after recentering.
+ const finalBox=getModelBounds();
+ if(!finalBox)return;
+ const finalSize=finalBox.getSize(new THREE.Vector3());
 
  const vFov=THREE.MathUtils.degToRad(cam.fov);
  const hFov=2*Math.atan(Math.tan(vFov/2)*Math.max(cam.aspect,0.01));
 
- const distV=(size.y*0.5)/Math.max(Math.tan(vFov/2),0.001);
- const distH=(size.x*0.5)/Math.max(Math.tan(hFov/2),0.001);
+ const distV=(finalSize.y*0.5)/Math.max(Math.tan(vFov/2),0.001);
+ const distH=(finalSize.x*0.5)/Math.max(Math.tan(hFov/2),0.001);
+ const dist=Math.max(distV,distH,finalSize.z*1.4,0.8)*padding;
 
- // Include depth and generous padding so the complete visible mesh stays in frame.
- const dist=Math.max(distV,distH,size.z*1.4,0.8)*padding;
-
- orbit.target.copy(center);
- cam.position.set(center.x,center.y,center.z+dist);
+ // Character is explicitly centered at world origin.
+ orbit.target.set(0,0,0);
+ cam.position.set(0,0,dist);
  cam.near=Math.max(0.005,dist/500);
  cam.far=Math.max(50,dist*50);
  cam.updateProjectionMatrix();
  orbit.update();
 
- console.info('FIT MODEL / SKINNED MESH', {
-   size:{x:size.x,y:size.y,z:size.z},
-   center:{x:center.x,y:center.y,z:center.z},
-   distance:dist
+ console.info('FIT MODEL / CENTERED', {
+   size:{x:finalSize.x,y:finalSize.y,z:finalSize.z},
+   distance:dist,
+   holderPosition:{
+     x:modelHolder.position.x,
+     y:modelHolder.position.y,
+     z:modelHolder.position.z
+   }
  });
 }
 
@@ -324,10 +349,15 @@ fitBtn.addEventListener('click',()=>{ normalizeModel(); requestAnimationFrame(()
 modelSize.addEventListener('input',()=>{
  const factor=Math.max(.2,Math.min(1.2,+modelSize.value||.65));
  modelSizeVal.textContent=Math.round(factor*100)+'%';
+
  if(modelHolder){
    modelHolder.scale.setScalar(fittedBaseScale*factor/.65);
    modelHolder.updateMatrixWorld(true);
    model.updateMatrixWorld(true);
+
+   // Scaling around an off-center exported origin causes the previous right/down drift.
+   recenterVisibleModel();
+
    requestAnimationFrame(()=>fitModelToFrame(2.35));
  }
 });
@@ -359,13 +389,6 @@ new GLTFLoader().load('./vibeman_02.glb',gltf=>{
  requestAnimationFrame(()=>{
    model.updateMatrixWorld(true);
    normalizeModel();
-
-   // Start deliberately smaller so the complete figure is visible even on narrow panels.
-   const factor=Math.max(.2,Math.min(1.2,+modelSize.value||.65));
-   modelHolder.scale.setScalar(fittedBaseScale*factor/.65);
-   modelHolder.updateMatrixWorld(true);
-   model.updateMatrixWorld(true);
-
    requestAnimationFrame(()=>fitModelToFrame(2.35));
  });
 
